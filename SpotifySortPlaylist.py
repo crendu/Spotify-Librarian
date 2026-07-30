@@ -1,34 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Analyse (DRY-RUN uniquement) des playlists Spotify :
-  1. Pour chaque titre de la playlist source, propose dans quelle playlist "XX bpm" et dans quelle playlist "Genre" il devrait aller.
-  2. Vérifie les playlists BPM / Genre existantes et signale les titres qui semblent mal placés.
-  3. Détecte les doublons à l'intérieur de chaque playlist.
-  4. Liste les playlists (BPM ou Genre) qu'il faudrait créer.
+Spotify playlist analysis (DRY-RUN only — read scopes, nothing is modified):
+  1) suggested BPM/Genre playlist for each source track
+  2) misplaced tracks
+  3) duplicates
+  4) playlists to create.
+Report: console + CSV.
 
-AUCUNE modification n'est faite sur votre compte : le script ne demande que des scopes en LECTURE et écrit un rapport (console + CSV).
+Setup: pip install spotipy requests | app on developer.spotify.com/dashboard (Redirect URI
+http://127.0.0.1:8888/callback) | fill the CONFIG block (env vars usable as fallback).
 
-PRÉREQUIS :
-  1. pip install spotipy requests
-  2. Créer une app sur https://developer.spotify.com/dashboard avec le Redirect URI : http://127.0.0.1:8888/callback
-  3. Remplir le bloc CONFIG ci-dessous : SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET (+ LASTFM_API_KEY recommandée).
-     Les variables d'environnement restent utilisables en secours.
-
-NOTE BPM : Spotify a déprécié l'endpoint /audio-features pour les apps créées après le 27/11/2024 (erreur 403).
-Le script essaie d'abord l'API Spotify, puis bascule automatiquement sur l'API gratuite ReccoBeats (https://reccobeats.com)
-qui accepte des IDs Spotify. Les titres sans BPM sont listés "BPM inconnu".
-
-NOTE GENRE : Spotify ne fournit pas de genre par TITRE, uniquement par ARTISTE -> jugé trop imprécis.
-Cascade appliquée :
-  1. tags Last.fm DU TITRE (par musique, source principale) -> LASTFM_API_KEY fortement recommandée (clé gratuite)
-  2. secours : genres Spotify des artistes du titre
-Chaque suggestion indique sa source ; ça reste une heuristique à valider.
-
-NOTE QUOTA (v9) : le quota journalier Spotify est vite épuisé depuis la migration 02/2026. Le script maintient donc
-un CACHE DISQUE (cache_spotify_tri.json) : contenus de playlists (invalidés par snapshot_id, donc rafraîchis
-uniquement si la playlist a changé), BPM ReccoBeats et tags Last.fm. Un run interrompu par le quota reprend là où
-il en était au lancement suivant, sans re-consommer ce qui a déjà été lu.
+BPM:
+    Spotify /audio-features is dead for post-2024 apps -> ReccoBeats fallback;
+    missing -> "unknown BPM".
+Genre cascade (Spotify has no per-track genre):
+    Last.fm track tags -> Last.fm
+    artist tags -> Spotify artist genres;
+    each suggestion states its source. Heuristic — double-check.
+Quota:
+    a disk cache (playlists by snapshot_id, BPMs, tags) makes every re-run incremental
+    an interrupted run resumes where it left off.
 """
 
 import csv
@@ -44,180 +36,174 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 # ======================================================================================================================
-# CONFIG — TOUT SE RENSEIGNE ICI
+# CONFIG — EVERYTHING IS SET HERE
 # ======================================================================================================================
 
-# --- 1) IDENTIFIANTS SPOTIFY (obligatoire) -> https://developer.spotify.com/dashboard :
-#        créer une app, copier Client ID / Client Secret, et déclarer le Redirect URI EXACTEMENT identique à celui ci-dessous.
+# --- 1) SPOTIFY CREDENTIALS (mandatory) -> https://developer.spotify.com/dashboard :
+#        create an app, copy Client ID / Client Secret, and register a Redirect URI EXACTLY equal to the one below.
 SPOTIFY_CLIENT_ID     = "XXX" # /!\
 SPOTIFY_CLIENT_SECRET = "XXX" # /!\
 SPOTIFY_REDIRECT_URI  = "http://127.0.0.1:8888/callback"
 
-# --- 2) CLÉ LAST.FM (fortement recommandée : source principale du genre PAR TITRE ;sans elle, on retombe sur les genres d'artistes Spotify)
-#        Clé gratuite : https://www.last.fm/api/account/create
+# --- 2) LAST.FM KEY (strongly recommended: primary source of the PER-TRACK genre; without it we fall back to Spotify artist genres).
+#        Free key: https://www.last.fm/api/account/create
 LASTFM_API_KEY = "XXX" # /!\
 
 # --- 3) PLAYLISTS
 SOURCE_PLAYLIST_ID = "XXX" # /!\
 
-# --- 4) RÉGLAGES BPM — tranches X0-X9 : un titre à 87 bpm va dans "80 bpm", un titre à 154 bpm va dans "150 bpm" (troncature à la dizaine)
+# --- 4) BPM SETTINGS — X0-X9 buckets: an 87 bpm track goes to "80 bpm", a 154 bpm track goes to "150 bpm" (truncated to the lower ten)
 BPM_STEP = 10
-# Un titre à 154 bpm peut aussi se "sentir" à 77 : afficher l'alternative moitié/double dans le rapport.
+# A track measured at 154 bpm can also "feel" like 77: show the half/double-tempo alternative in the report.
 SHOW_HALF_DOUBLE_TEMPO = True
 
-# --- 5) RÈGLES DE GENRE (grosse maille) — nom exact de vos playlists + mots-clés (minuscules) comparés aux tags
-#        Last.fm du titre et aux genres d'artistes Spotify. L'ordre = priorité : le premier genre qui matche gagne.
-#        Les micro-genres ("melodic drill", "bedroom pop"...) sont rabattus sur vos grandes catégories.
-#        La section "genres non mappés" du rapport vous aidera à décider d'une éventuelle nouvelle catégorie.
+# --- 5) GENRE RULES (coarse) — exact Spotify playlist names (keep them in French!) + lowercase keywords matched against Last.fm tags / Spotify genres.
+#        Order = priority, first match wins. Style beats language: French rap -> Rap; "Française" only catches style-less tracks (move it to the top to invert).
 GENRE_RULES = [
-    ("Française",  ["french", "chanson", "variete francaise", "variété française", "francoton"]),
     ("Latina",     ["latin", "reggaeton", "cumbia", "salsa", "bachata", "urbano", "corrido", "mariachi"]),
     ("Classique",  ["classical", "baroque", "romantic era", "opera", "orchestr", "chamber", "requiem"]),
     ("Jazz",       ["jazz", "bebop", "swing", "bossa nova", "big band"]),
     ("Reggae",     ["reggae", "dancehall", "ska", "dub", "roots"]),
-    ("Rap",        ["rap", "hip hop", "hip-hop", "trap", "drill", "grime", "boom bap"]),
+    ("Rap",        ["rap", "hip hop", "hip-hop", "hiphop", "trap", "drill", "grime", "boom bap"]),
     ("Soul",       ["soul", "r&b", "rnb", "funk", "motown", "gospel"]),
-    ("Electro",    ["electro", "edm", "house", "techno", "trance", "dubstep", "drum and bass", "dnb", "bass music", "synthwave", "big room"]),
+    ("Electro",    ["electro", "edm", "house", "techno", "tekno", "hardtek", "tribe", "trance", "dubstep", "drum and bass", "dnb", "bass music", "synthwave", "big room"]),
     ("Dance",      ["dance pop", "dance", "disco", "eurodance", "hyperpop"]),
     ("Rock",       ["rock", "metal", "punk", "grunge", "emo", "hardcore", "shoegaze", "garage"]),
-    ("Pop",        ["pop", "indie", "singer-songwriter"]),  # fourre-tout en dernier
+    ("Française",  ["french", "chanson", "variete francaise", "variété française", "francoton"]),
+    ("Pop",        ["pop", "indie", "singer-songwriter"]),  # catch-all, keep last
 ]
 
-# --- 5bis) SECOURS GENRE VIA SPOTIFY — depuis la migration API 02/2026, récupérer les genres d'artistes exige
-#           un appel par artiste, ce qui épuise le quota journalier de l'app sur les grosses bibliothèques
-#           (blocage ~24 h). Désactivé par défaut : Last.fm reste la source principale du genre ; les titres
-#           inconnus de Last.fm seront "genre non identifié" au lieu d'être estimés via l'artiste.
+# --- 5bis) GENRE FALLBACK VIA SPOTIFY — one call per artist since the 02/2026 migration = quota killer on big libraries.
+#           Off by default; unknown-to-Last.fm tracks then show "unidentified genre".
 USE_SPOTIFY_ARTIST_GENRES = False
-MAX_ARTIST_LOOKUPS = 200    # plafond d'appels unitaires si le secours est activé (protège le quota)
+MAX_ARTIST_LOOKUPS = 200    # cap on unitary calls if the fallback is enabled (protects the quota)
 
-# --- 6) SORTIE ET CACHE
-OUTPUT_DIR = "rapport_spotify"          # dossier des CSV du rapport
-CACHE_FILE = "cache_spotify_tri.json"   # cache disque : playlists (par snapshot), BPM ReccoBeats, tags Last.fm
-                                        # -> à supprimer pour forcer une relecture complète
+# --- 6) OUTPUT AND CACHE
+OUTPUT_DIR = "rapport_spotify"          # folder for the report CSVs
+CACHE_FILE = "cache_spotify_tri.json"   # disk cache: playlists (by snapshot), ReccoBeats BPMs, Last.fm tags
+                                        # -> delete it to force a full re-read
 
-# --- 6bis) PROXY D'ENTREPRISE (optionnel — utile derrière un pare-feu qui bloque l'accès direct à Internet)
-#           Format : "http://proxy.mondomaine.fr:8080" ou "http://user:motdepasse@proxy.mondomaine.fr:8080"
-#           Laisser vide pour une connexion directe (maison). Le proxy s'applique à Spotify, Last.fm et ReccoBeats.
+# --- 6bis) CORPORATE PROXY — "http://[user:pass@]proxy:port", empty = direct connection (home).
 PROXY_URL = "" # /!\
 
-# --- 6ter) CERTIFICATS SSL (proxys d'entreprise avec inspection SSL -> erreur CERTIFICATE_VERIFY_FAILED)
-#           USE_SYSTEM_CERTS = True : Python utilise le magasin de certificats Windows (où l'IT a installé le
-#           certificat racine de l'entreprise). Nécessite : pip install truststore
+# --- 6ter) SSL — True: use the Windows cert store (fixes CERTIFICATE_VERIFY_FAILED behind SSL-inspecting proxies; requires: pip install truststore).
 USE_SYSTEM_CERTS = True
 
-# --- 7) AVANCÉ (ne toucher que si besoin)
+# --- 7) ADVANCED (only touch if needed)
 RECCOBEATS_URL = "https://api.reccobeats.com/v1/audio-features"
 LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
-LASTFM_MIN_TAG_COUNT = 10                                       # ignorer les tags Last.fm trop marginaux
-SCOPES = "playlist-read-private playlist-read-collaborative"    # lecture seule !
+LASTFM_MIN_TAG_COUNT = 10                                       # ignore overly marginal Last.fm tags
+SCOPES = "playlist-read-private playlist-read-collaborative"    # read-only!
+
+# --- 8) EXTERNAL-API TEST (ReccoBeats + Last.fm, zero Spotify) — paste track links (Spotify app: right-click
+#        -> Share -> Copy link), or "link | Artist | Title" to force names. Non-empty list = test only, then stop.
+#       Results are cached and reused by the real run.
+TEST_EXTERNES = [
+    # "https://open.spotify.com/intl-fr/track/5KjJYrM3UXmvhqtQntrsJM?si=e7311651acdd4323",
+    # "https://open.spotify.com/intl-fr/track/0BeWasraWroRVAFUJ6bXE9?si=53dad651067e4316",
+    # "https://open.spotify.com/intl-fr/track/5xxSDrzTHvmumxskl3nHkh?si=2b45dee672c44284",
+    # "https://open.spotify.com/intl-fr/track/1om616X5tor0L7UR78zapJ?si=27ed7df614ca4ca4",
+    # "https://open.spotify.com/intl-fr/track/1LamF1mUMBPRqQLcZx83ox?si=5c28f3bfc9934712"
+]
+# Unknown to ReccoBeats -> fetch title/artist via Spotify (1 call per unknown track); False = 100% Spotify-free.
+SPOTIFY_TRACK_FALLBACK = True
 
 # ======================================================================================================================
-# FIN DE LA CONFIG — rien à modifier en dessous
+# END OF CONFIG — nothing to modify below
 # ======================================================================================================================
 
 GENRE_PLAYLIST_NAMES = [name for name, _ in GENRE_RULES]
 
-# Variables d'environnement utilisables en secours si les champs ci-dessus sont vides
-# (pratique pour ne pas committer ses secrets).
+# Env vars as fallback when the fields above are empty (avoids committing secrets).
 SPOTIFY_CLIENT_ID     = SPOTIFY_CLIENT_ID or os.environ.get("SPOTIPY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = SPOTIFY_CLIENT_SECRET or os.environ.get("SPOTIPY_CLIENT_SECRET", "")
 SPOTIFY_REDIRECT_URI  = SPOTIFY_REDIRECT_URI or os.environ.get("SPOTIPY_REDIRECT_URI", "")
 LASTFM_API_KEY        = LASTFM_API_KEY or os.environ.get("LASTFM_API_KEY", "")
 
-# Proxy : requests (utilisé par spotipy, Last.fm et ReccoBeats) lit HTTP_PROXY/HTTPS_PROXY dans l'environnement.
+# Proxy: requests (used by spotipy, Last.fm and ReccoBeats) reads HTTP_PROXY/HTTPS_PROXY from the environment.
 if PROXY_URL:
     os.environ["HTTP_PROXY"] = PROXY_URL
     os.environ["HTTPS_PROXY"] = PROXY_URL
-    os.environ["NO_PROXY"] = "127.0.0.1,localhost"  # le callback OAuth reste local, il ne doit pas passer par le proxy
+    os.environ["NO_PROXY"] = "127.0.0.1,localhost"  # the OAuth callback stays local, it must not go through the proxy
 
-# Certificats : proxys d'entreprise avec inspection SSL.
+# Certificates: corporate proxies with SSL inspection.
 if USE_SYSTEM_CERTS:
     try:
         import truststore
-        truststore.inject_into_ssl()  # Python valide désormais via le magasin de certificats de l'OS
+        truststore.inject_into_ssl()  # Python now validates against the OS certificate store
     except ImportError:
-        print("INFO : module 'truststore' absent (pip install truststore) -> validation SSL via les certificats\n"
-              "       par défaut de Python. Sans impact en connexion directe ; derrière un proxy à inspection SSL,\n"
-              "       attendez-vous à une erreur CERTIFICATE_VERIFY_FAILED.", file=sys.stderr)
+        print("INFO: 'truststore' missing (pip install truststore) — needed behind an SSL-inspecting proxy, harmless otherwise.", file=sys.stderr)
+
+# Shared HTTP session (ReccoBeats, Last.fm): connection pooling skips a TLS handshake per call.
+_http = requests.Session()
 
 # ======================================================================================================================
-# CACHE DISQUE — protège le quota Spotify et accélère les relances
+# DISK CACHE — protects the Spotify quota and speeds up re-runs
 # ======================================================================================================================
 _cache = {"playlists": {}, "tempos": {}, "lastfm": {}}
 _cache_dirty = 0
 
-
 def load_cache():
-    global _cache
     try:
         with open(CACHE_FILE, encoding="utf-8") as f:
             data = json.load(f)
         for k in _cache:
             _cache[k].update(data.get(k, {}))
-        print(f"Cache chargé : {len(_cache['playlists'])} playlists, {len(_cache['tempos'])} BPM, "
-              f"{len(_cache['lastfm'])} lookups Last.fm ({CACHE_FILE})")
+        print(f"Cache loaded: {len(_cache['playlists'])} playlists, {len(_cache['tempos'])} BPMs, "
+              f"{len(_cache['lastfm'])} Last.fm lookups ({CACHE_FILE})")
     except FileNotFoundError:
         pass
     except (json.JSONDecodeError, OSError) as e:
-        print(f"! cache illisible ({e}) -> on repart de zéro", file=sys.stderr)
-
+        print(f"! unreadable cache ({e}) -> starting from scratch", file=sys.stderr)
 
 def save_cache(force=False):
-    """Écrit le cache sur disque. Appelé après chaque bloc de travail (et périodiquement pendant Last.fm)."""
+    """Writes the cache to disk atomically (temp file + rename: a kill mid-write cannot corrupt it)."""
     global _cache_dirty
     if not force and _cache_dirty < 50:
         return
     try:
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        tmp = CACHE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(_cache, f, ensure_ascii=False)
+        os.replace(tmp, CACHE_FILE)
         _cache_dirty = 0
     except OSError as e:
-        print(f"! cache non sauvegardé : {e}", file=sys.stderr)
-
+        print(f"! cache not saved: {e}", file=sys.stderr)
 
 def quota_exit(context):
     save_cache(force=True)
-    sys.exit(f"\nERREUR : Spotify refuse les requêtes ({context}) — quota journalier de l'app très probablement "
-             f"épuisé.\n"
-             f"-> Option 1 : réessayer dans ~24 h.\n"
-             f"-> Option 2 : créer une SECONDE app sur developer.spotify.com/dashboard (même Redirect URI),\n"
-             f"   reporter ses Client ID/Secret dans le CONFIG et SUPPRIMER le fichier .spotify_token_cache.\n"
-             f"Le cache disque ({CACHE_FILE}) a été sauvegardé : le prochain run ne relira que le manquant.")
-
+    sys.exit(f"\nERROR: Spotify quota exhausted ({context}). Retry in ~24 h, or switch to a new app "
+             f"(+ delete .spotify_token_cache). Cache saved: next run only fetches what is missing.")
 
 # ======================================================================================================================
-# HELPERS SPOTIFY
+# SPOTIFY HELPERS
 # ======================================================================================================================
 def get_client() -> spotipy.Spotify:
     if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-        sys.exit("ERREUR : SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET non renseignés.\n"
-                 "-> Ouvrez le script et remplissez le bloc CONFIG en haut du fichier (identifiants à créer sur\n"
-                 "   https://developer.spotify.com/dashboard, avec le Redirect URI exactement égal\n"
-                 "   à SPOTIFY_REDIRECT_URI).")
-    # status_retries=0 : sur un 429 (quota), spotipy lève l'erreur immédiatement au lieu de dormir des heures
+        sys.exit("ERROR: SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET not set — fill the CONFIG block "
+                 "(credentials: developer.spotify.com/dashboard, Redirect URI = SPOTIFY_REDIRECT_URI).")
+    # status_retries=0: on a 429 (quota), spotipy raises immediately instead of sleeping for hours
     auth = SpotifyOAuth(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, redirect_uri=SPOTIFY_REDIRECT_URI,
                         scope=SCOPES, open_browser=True, cache_path=".spotify_token_cache")
     return spotipy.Spotify(auth_manager=auth, retries=3, status_retries=0, requests_timeout=15)
 
-
 def fetch_all(sp, first_page):
-    """Itère sur toutes les pages d'un résultat paginé Spotify."""
+    """Iterates over every page of a paginated Spotify result."""
     items, page = list(first_page["items"]), first_page
     while page["next"]:
         page = sp.next(page)
         items.extend(page["items"])
     return items
 
-
 def _parse_playlist_items(items):
-    """Extrait les pistes d'une liste d'items, au format ancien (clé 'track') comme nouveau (clé 'item')."""
+    """Extracts tracks from a list of items, old format ('track' key) and new format ('item' key) alike."""
     tracks = []
     for it in items:
         t = it.get("track") or it.get("item") or {}
         if not t or t.get("is_local") or not t.get("id"):
             continue
         if t.get("type") and t["type"] != "track":
-            continue  # épisodes de podcast, etc.
+            continue  # podcast episodes, etc.
         tracks.append({"id": t["id"], "name": t["name"],
                        "artists": ", ".join(a["name"] for a in t.get("artists", [])),
                        "artist_ids": [a["id"] for a in t.get("artists", []) if a.get("id")]})
@@ -225,80 +211,105 @@ def _parse_playlist_items(items):
 
 def get_playlist_tracks(sp, playlist_id, snapshot_id=None):
     """
-    Retourne [{id, name, artists, artist_ids}] pour une playlist. Titres locaux/indisponibles/épisodes ignorés.
-    CACHE : si le snapshot_id n'a pas changé depuis le dernier run, le contenu vient du disque (0 appel API).
-    Migration API Spotify 02/2026 : on interroge d'abord le NOUVEAU endpoint /playlists/{id}/items (pagination
-    manuelle, spotipy n'a pas encore de méthode dédiée) ; l'ancien /tracks ne sert plus que de repli, pour ne
-    pas payer deux fois la pagination sur les apps post-migration. Un 429 arrête le script proprement.
+    [{id, name, artists, artist_ids}] for a playlist; locals/episodes skipped. Unchanged snapshot_id -> served
+    from cache (0 call). 02/2026 migration: new /items endpoint first, old /tracks as fallback; 429 exits cleanly.
     """
     global _cache_dirty
     cached = _cache["playlists"].get(playlist_id)
     if cached and snapshot_id and cached.get("snapshot_id") == snapshot_id:
         return cached["tracks"]
 
-    # 1) nouvel endpoint /items (post-migration)
-    raw_items, offset, new_ok = [], 0, True
+    # 1) new /items endpoint (post-migration) — pages are parsed on the fly to keep memory flat
+    tracks, offset, new_ok = [], 0, True
     while True:
         try:
             page = sp._get(f"playlists/{playlist_id}/items", limit=100, offset=offset)
         except spotipy.exceptions.SpotifyException as e:
             if e.http_status == 429:
-                quota_exit(f"lecture de la playlist {playlist_id}")
-            new_ok = offset > 0  # échec dès la 1re page -> on tentera l'ancien endpoint
+                quota_exit(f"reading playlist {playlist_id}")
+            new_ok = offset > 0  # failure on the very first page -> we will try the old endpoint
             break
         except requests.exceptions.RequestException as e:
-            print(f"  ! réseau instable sur {playlist_id} ({type(e).__name__}) -> nouvelle tentative dans 5 s",
-                  file=sys.stderr)
+            print(f"  ! flaky network on {playlist_id} ({type(e).__name__}) -> retrying in 5 s", file=sys.stderr)
             time.sleep(5)
             continue
         items = page.get("items", [])
-        raw_items.extend(items)
+        tracks.extend(_parse_playlist_items(items))
         if not items or not page.get("next"):
             break
         offset += len(items)
 
-    # 2) repli : ancien endpoint /tracks via spotipy (apps d'avant la migration)
-    if not new_ok and not raw_items:
+    # 2) fallback: old /tracks endpoint via spotipy (pre-migration apps)
+    if not new_ok and not tracks:
         try:
             page = sp.playlist_items(playlist_id, additional_types=("track",))
-            raw_items = fetch_all(sp, page)
+            tracks = _parse_playlist_items(fetch_all(sp, page))
         except spotipy.exceptions.SpotifyException as e:
             if e.http_status == 429:
-                quota_exit(f"lecture de la playlist {playlist_id} (ancien endpoint)")
-            print(f"  ! playlist {playlist_id} illisible ({e.http_status})", file=sys.stderr)
-            raw_items = []
+                quota_exit(f"reading playlist {playlist_id} (old endpoint)")
+            print(f"  ! playlist {playlist_id} unreadable ({e.http_status})", file=sys.stderr)
+            tracks = []
 
-    tracks = _parse_playlist_items(raw_items)
     if snapshot_id:
         _cache["playlists"][playlist_id] = {"snapshot_id": snapshot_id, "tracks": tracks}
         _cache_dirty += 1
-        save_cache(force=True)  # chaque playlist lue est immédiatement sécurisée sur disque
+        save_cache(force=True)  # every playlist read is immediately secured on disk
     return tracks
-
 
 def get_my_playlists(sp):
     try:
         return fetch_all(sp, sp.current_user_playlists(limit=50))
     except spotipy.exceptions.SpotifyException as e:
         if e.http_status == 429:
-            quota_exit("liste des playlists")
+            quota_exit("playlist listing")
         raise
 
+# ======================================================================================================================
+# BPM: Spotify -> ReccoBeats fallback (with disk cache, backoff and circuit breaker)
+# ======================================================================================================================
+_reccobeats_failures = 0  # consecutive failures -> circuit breaker
 
-# ======================================================================================================================
-# BPM : Spotify -> fallback ReccoBeats (avec cache disque)
-# ======================================================================================================================
+def _reccobeats_get(endpoint, ids):
+    """Backoff on 429 (Retry-After, capped 60 s) and 5xx, 4 attempts; 3 failed batches in a row = circuit breaker for the run. Returns the 'content' list, or None."""
+    global _reccobeats_failures
+    if _reccobeats_failures >= 3:
+        return None
+    url = RECCOBEATS_URL.rsplit("/", 1)[0] + "/" + endpoint
+    for attempt in range(1, 5):
+        try:
+            r = _http.get(url, params={"ids": ",".join(ids)}, timeout=20)
+            if r.status_code == 429:
+                wait = min(int(r.headers.get("Retry-After") or 5), 60)
+                print(f"     ! ReccoBeats rate-limit (429) -> pausing {wait}s (attempt {attempt}/4)", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            if r.status_code >= 500:
+                time.sleep(2 * attempt)
+                continue
+            r.raise_for_status()
+            _reccobeats_failures = 0
+            return r.json().get("content", [])
+        except (requests.RequestException, ValueError) as e:
+            print(f"     ! ReccoBeats {endpoint}: {type(e).__name__} (attempt {attempt}/4)", file=sys.stderr)
+            time.sleep(2 * attempt)
+    _reccobeats_failures += 1
+    if _reccobeats_failures >= 3:
+        print("     ! ReccoBeats: 3 failed batches -> stopping for this run (cache keeps the rest)", file=sys.stderr)
+    return None
+
+_RB_ID_RE = re.compile(r"track/([A-Za-z0-9]+)")  # compiled once: href = .../track/{spotify_id}
+
 def get_tempos(sp, track_ids):
-    """dict {track_id: bpm float ou None}. Les BPM déjà connus viennent du cache disque, 0 appel."""
+    """dict {track_id: float bpm or None}. Already-known BPMs come from the disk cache, 0 calls."""
     global _cache_dirty
     tempos = {tid: _cache["tempos"].get(tid) for tid in track_ids}
     missing = [tid for tid, v in tempos.items() if v is None]
     if not missing:
-        print("  -> tous les BPM sont en cache")
+        print("  -> all BPMs are cached")
         return tempos
-    print(f"  -> {len(track_ids) - len(missing)} BPM en cache, {len(missing)} à récupérer")
+    print(f"  -> {len(track_ids) - len(missing)} BPMs cached, {len(missing)} to fetch")
 
-    # --- 1) tentative via Spotify (fonctionne seulement pour les apps créées avant le 27/11/2024)
+    # --- 1) Spotify attempt (only works for apps created before 2024-11-27)
     spotify_ok = True
     try:
         feats = sp.audio_features(missing[:1])
@@ -308,7 +319,7 @@ def get_tempos(sp, track_ids):
         spotify_ok = False
 
     if spotify_ok:
-        print("  -> BPM via l'API Spotify (audio-features)")
+        print("  -> BPM via the Spotify API (audio-features)")
         for i in range(0, len(missing), 100):
             for f in sp.audio_features(missing[i:i + 100]) or []:
                 if f and f.get("tempo"):
@@ -318,58 +329,51 @@ def get_tempos(sp, track_ids):
         save_cache(force=True)
         return tempos
 
-    # --- 2) fallback ReccoBeats (accepte des IDs Spotify, max ~40/requête)
-    print("  -> API Spotify indisponible (endpoint déprécié), fallback ReccoBeats")
+    # --- 2) ReccoBeats fallback (accepts Spotify IDs, ~40 max per request)
+    print("  -> Spotify API unavailable (deprecated endpoint), falling back to ReccoBeats")
     for i in range(0, len(missing), 40):
-        batch = missing[i:i + 40]
-        try:
-            r = requests.get(RECCOBEATS_URL, params={"ids": ",".join(batch)}, timeout=20)
-            r.raise_for_status()
-            for item in r.json().get("content", []):
-                m = re.search(r"track/([A-Za-z0-9]+)", item.get("href", ""))  # href = .../track/{spotify_id}
-                sid = m.group(1) if m else None
-                if sid in tempos and item.get("tempo"):
-                    tempos[sid] = round(float(item["tempo"]), 1)
-                    _cache["tempos"][sid] = tempos[sid]
-                    _cache_dirty += 1
-        except requests.RequestException as e:
-            print(f"     ! ReccoBeats erreur sur un lot : {e}", file=sys.stderr)
+        content = _reccobeats_get("audio-features", missing[i:i + 40])
+        if content is None:
+            if _reccobeats_failures >= 3:
+                break  # circuit breaker: no point insisting on the remaining batches
+            continue
+        for item in content:
+            m = _RB_ID_RE.search(item.get("href", ""))
+            sid = m.group(1) if m else None
+            if sid in tempos and item.get("tempo"):
+                tempos[sid] = round(float(item["tempo"]), 1)
+                _cache["tempos"][sid] = tempos[sid]
+                _cache_dirty += 1
         save_cache()
-        time.sleep(0.5)  # politesse
+        time.sleep(0.5)  # politeness
     save_cache(force=True)
     return tempos
 
 def bpm_bucket(tempo):
-    """Tranche X0-X9 : 87.3 -> 80, 154 -> 150 (troncature à la dizaine)."""
+    """X0-X9 bucket: 87.3 -> 80, 154 -> 150 (truncated to the ten)."""
     return None if tempo is None else int(tempo // BPM_STEP) * BPM_STEP
 
 # ======================================================================================================================
-# GENRE : cascade "la meilleure info par titre d'abord"
-#   1) Tags Last.fm DU TITRE (par musique -> la source la plus précise ici). Nécessite LASTFM_API_KEY (clé gratuite).
-#   2) Secours : genres Spotify des artistes du titre (Spotify n'a pas de genre par titre dans son API, uniquement par artiste).
+# GENRE — cascade: Last.fm track tags -> Last.fm main-artist tags -> Spotify artist genres
 # ======================================================================================================================
 def get_artist_genres(sp, artist_ids):
-    """
-    dict {artist_id: [genres]}. Secours du genre (Last.fm est la source principale). Migration 02/2026 :
-    le batch GET /artists est supprimé ; les appels unitaires épuisent le quota journalier de l'app sur les grosses bibliothèques.
-    Désactivé par défaut (USE_SPOTIFY_ARTIST_GENRES) ; si activé, plafonné et avec arrêt immédiat sur 429 pour ne jamais bloquer 24 h.
-    """
+    """{artist_id: [genres]} — genre fallback, off by default (quota killer since 02/2026: one call per artist).
+    When enabled: capped at MAX_ARTIST_LOOKUPS, immediate stop on 429."""
     if not USE_SPOTIFY_ARTIST_GENRES:
-        print("  (secours genres Spotify désactivé — Last.fm seul, cf. USE_SPOTIFY_ARTIST_GENRES)")
+        print("  (Spotify artist-genre fallback disabled — Last.fm only, see USE_SPOTIFY_ARTIST_GENRES)")
         return {}
     out, ids = {}, list(set(artist_ids))
-    try:  # 1) batch (50 par appel) — apps d'avant la migration
+    try:  # 1) batch (50 per call) — pre-migration apps
         for i in range(0, len(ids), 50):
             for a in sp.artists(ids[i:i + 50])["artists"]:
                 if a:
                     out[a["id"]] = [g.lower() for g in a.get("genres", [])]
         return out
     except spotipy.exceptions.SpotifyException:
-        print("  ! endpoint batch /artists supprimé (migration Spotify 02/2026) -> appels unitaires", file=sys.stderr)
+        print("  ! batch /artists endpoint removed (Spotify 02/2026 migration) -> unitary calls", file=sys.stderr)
     if len(ids) > MAX_ARTIST_LOOKUPS:
-        print(f"  ! {len(ids)} artistes > plafond MAX_ARTIST_LOOKUPS={MAX_ARTIST_LOOKUPS} : "
-              f"seuls les {MAX_ARTIST_LOOKUPS} premiers seront interrogés (protection du quota)", file=sys.stderr)
-    try:  # 2) unitaire — plafonné
+        print(f"  ! {len(ids)} artists > cap: only the first {MAX_ARTIST_LOOKUPS} queried (quota protection)", file=sys.stderr)
+    try:  # 2) unitary — capped
         for i, aid in enumerate(ids[:MAX_ARTIST_LOOKUPS]):
             a = sp.artist(aid)
             if a:
@@ -378,98 +382,257 @@ def get_artist_genres(sp, artist_ids):
                 time.sleep(1)
     except spotipy.exceptions.SpotifyException as e:
         if e.http_status == 429:
-            print("  ! quota Spotify atteint (429) -> secours genres abandonné, Last.fm reste la source",
-                  file=sys.stderr)
+            print("  ! Spotify quota reached (429) -> genre fallback abandoned", file=sys.stderr)
         else:
-            print(f"  ! genres d'artistes Spotify indisponibles ({e.http_status}) -> secours abandonné",
-                  file=sys.stderr)
+            print(f"  ! Spotify artist genres unavailable ({e.http_status}) -> fallback abandoned", file=sys.stderr)
     return out
 
+_lastfm_fail_streak = 0  # consecutive failures -> circuit breaker (avoids 2000 calls doomed to fail)
+_lastfm_disabled = False
 
-def get_lastfm_track_tags(artist, title):
-    """Tags Last.fm pour un titre précis (par musique). [] si indisponible. Cache disque (y compris les échecs)."""
+def _lastfm_get(params, verbose=False):
+    """Raw Last.fm call: retries on rate-limit (HTTP 429 / error 29); 10 straight network failures = circuit breaker for the run.
+    Returns JSON, or None on failure (never cached)."""
+    global _lastfm_fail_streak, _lastfm_disabled
+    if _lastfm_disabled or not LASTFM_API_KEY:
+        return None
+    for attempt in range(1, 4):
+        try:
+            r = _http.get(LASTFM_URL, params={**params, "api_key": LASTFM_API_KEY, "format": "json"}, timeout=15)
+            data = r.json()
+            err_code = data.get("error") if isinstance(data, dict) else None
+            err = data.get("message") if err_code else None
+            if r.status_code == 429 or err_code == 29:  # 29 = Last.fm-side rate limit exceeded
+                wait = min(int(r.headers.get("Retry-After") or 5), 30) * attempt
+                print(f"     ! Last.fm rate-limit -> pausing {wait}s (attempt {attempt}/3)", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            if verbose:
+                print(f"     [Last.fm HTTP {r.status_code}{' — error: ' + err if err else ''}]")
+            _lastfm_fail_streak = 0
+            if r.status_code != 200 or err:
+                return None
+            return data
+        except (requests.RequestException, ValueError) as e:
+            if verbose:
+                print(f"     [Last.fm NETWORK FAILURE: {type(e).__name__} — proxy?]")
+            time.sleep(2 * attempt)
+    _lastfm_fail_streak += 1
+    if _lastfm_fail_streak >= 10 and not _lastfm_disabled:
+        _lastfm_disabled = True
+        print("     ! Last.fm: 10 consecutive failures -> stopping for this run (cache keeps the rest)", file=sys.stderr)
+    return None
+
+def _extract_tags(data, root):
+    raw = (data or {}).get(root, {}).get("tag", [])
+    if isinstance(raw, dict):  # Last.fm returns a dict (not a list) when there is a single tag
+        raw = [raw]
+    return [t["name"].lower() for t in raw if int(t.get("count", 0)) >= LASTFM_MIN_TAG_COUNT][:10]
+
+def get_lastfm_track_tags(artist, title, verbose=False):
+    """Last.fm tags of a specific TRACK. [] if unavailable. Disk cache (network failures are never cached)."""
     global _cache_dirty
-    if not LASTFM_API_KEY:
-        return []
     key = f"{artist.lower()}||{title.lower()}"
     if key in _cache["lastfm"]:
         return _cache["lastfm"][key]
-    tags = []
-    try:
-        r = requests.get(LASTFM_URL, params={"method": "track.gettoptags", "artist": artist, "track": title,
-                                             "api_key": LASTFM_API_KEY, "format": "json", "autocorrect": 1}, timeout=15)
-        r.raise_for_status()
-        raw = r.json().get("toptags", {}).get("tag", [])
-        tags = [t["name"].lower() for t in raw if int(t.get("count", 0)) >= LASTFM_MIN_TAG_COUNT][:10]
-    except (requests.RequestException, ValueError, KeyError, TypeError):
-        pass
+    if not LASTFM_API_KEY:
+        return []
+    data = _lastfm_get({"method": "track.gettoptags", "artist": artist, "track": title, "autocorrect": 1}, verbose=verbose)
+    time.sleep(0.25)  # honour the Last.fm rate limit
+    if data is None:
+        return []
+    tags = _extract_tags(data, "toptags")
     _cache["lastfm"][key] = tags
     _cache_dirty += 1
-    save_cache()  # sauvegarde périodique (tous les ~50 nouveaux lookups)
-    time.sleep(0.25)  # respect du rate-limit Last.fm
+    save_cache()  # periodic save (every ~50 new lookups)
     return tags
 
+def get_lastfm_artist_tags(artist, verbose=False):
+    """Last.fm tags of an ARTIST (2nd cascade stage: obscure tracks often have no tags of their own)."""
+    global _cache_dirty
+    key = f"artist::{artist.lower()}"
+    if key in _cache["lastfm"]:
+        return _cache["lastfm"][key]
+    if not LASTFM_API_KEY:
+        return []
+    data = _lastfm_get({"method": "artist.gettoptags", "artist": artist, "autocorrect": 1}, verbose=verbose)
+    time.sleep(0.25)
+    if data is None:
+        return []
+    tags = _extract_tags(data, "toptags")
+    _cache["lastfm"][key] = tags
+    _cache_dirty += 1
+    save_cache()
+    return tags
+
+# One compiled regex per category: much faster than nested keyword loops, same order semantics.
+_GENRE_PATTERNS = [(cat, re.compile("|".join(re.escape(kw) for kw in kws))) for cat, kws in GENRE_RULES]
+
 def match_category(genre_list):
-    """Rabat une liste de genres/tags bruts sur vos catégories grosse maille."""
-    for category, keywords in GENRE_RULES:
-        for g in genre_list:
-            if any(kw in g for kw in keywords):
-                return category
+    """Folds a list of raw genres/tags into your coarse-grained categories. First matching category wins."""
+    joined = " \u00a7 ".join(genre_list)
+    for category, pattern in _GENRE_PATTERNS:
+        if pattern.search(joined):
+            return category
     return None
 
 _genre_cache = {}
 
 def resolve_genre(track, artist_genres):
-    """
-    Retourne (categorie|None, genres_bruts, source). Priorité INVERSÉE volontairement :
-    le genre Spotify n'existe qu'au niveau ARTISTE (imprécis pour un titre donné), donc on interroge d'abord Last.fm
-    avec les tags DU TITRE, et Spotify ne sert que de filet de sécurité si Last.fm ne connaît pas le morceau.
-    """
+    """(category|None, raw_genres, source). Cascade: Last.fm track tags -> Last.fm main-artist tags ->
+    Spotify artist genres (Spotify has no per-track genre, hence last)."""
     if track["id"] in _genre_cache:
         return _genre_cache[track["id"]]
 
-    # 1) Last.fm : tags par TITRE (la "bonne info", par musique)
+    # 1) Last.fm: per-TRACK tags (the "right info", per song)
     main_artist = track["artists"].split(",")[0].strip()
     tags = get_lastfm_track_tags(main_artist, track["name"])
     cat = match_category(tags) if tags else None
     if cat:
-        result = (cat, tags, "Last.fm (titre)")
+        result = (cat, tags, "Last.fm (track)")
     else:
-        # 2) Secours : genres Spotify des artistes du titre
-        sp_genres = [g for aid in track["artist_ids"] for g in artist_genres.get(aid, [])]
-        cat2 = match_category(sp_genres) if sp_genres else None
+        # 2) Last.fm: MAIN ARTIST tags (obscure tracks rarely have track tags)
+        atags = get_lastfm_artist_tags(main_artist)
+        cat2 = match_category(atags) if atags else None
         if cat2:
-            result = (cat2, sp_genres, "Spotify (artiste)")
+            result = (cat2, atags, "Last.fm (artist)")
         else:
-            result = (None, tags or sp_genres, "aucune")  # aucune source concluante : renvoyer ce qu'on a vu, pour info
+            # 3) Fallback: Spotify genres of the track's artists
+            sp_genres = [g for aid in track["artist_ids"] for g in artist_genres.get(aid, [])]
+            cat3 = match_category(sp_genres) if sp_genres else None
+            if cat3:
+                result = (cat3, sp_genres, "Spotify (artist)")
+            else:
+                result = (None, tags or atags or sp_genres, "none")  # nothing conclusive: return what we saw
 
     _genre_cache[track["id"]] = result
     return result
 
 # ======================================================================================================================
-# MAIN
+# EXTERNAL-API TEST MODE (no Spotify OAuth, quota-free except the optional per-unknown-track fallback)
 # ======================================================================================================================
-def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    load_cache()
-    sp = get_client()
-    try:
-        me = sp.current_user()
-    except spotipy.exceptions.SpotifyException as e:
-        if e.http_status == 429:
-            quota_exit("authentification")
-        raise
-    print(f"Connecté en tant que : {me['display_name']} ({me['id']})")
-    if LASTFM_API_KEY:
-        print("Genre par titre : Last.fm ACTIF (source principale), Spotify artiste en secours\n")
-    else:
-        print("ATTENTION : LASTFM_API_KEY absente -> genres estimés uniquement via les artistes Spotify\n"
-              "(moins précis par titre).\n"
-              "Clé gratuite : https://www.last.fm/api/account/create\n")
+def run_external_test():
+    """Tests ReccoBeats (BPM + track info) and Last.fm (tags/genre) for real, without touching the Spotify API."""
+    print(f"EXTERNAL TEST: {len(TEST_EXTERNES)} track(s) — ReccoBeats + Last.fm, zero Spotify calls\n")
+    entries = []
+    for line in TEST_EXTERNES:
+        parts = [p.strip() for p in line.split("|")]
+        m = re.search(r"track/([A-Za-z0-9]{22})", parts[0]) or re.fullmatch(r"([A-Za-z0-9]{22})", parts[0])
+        if not m:
+            print(f"  ! no Spotify ID found in: {parts[0]!r}")
+            continue
+        artist = parts[1] if len(parts) >= 3 else ""
+        title = parts[2] if len(parts) >= 3 else ""
+        entries.append({"id": m.group(1), "artist": artist, "title": title})
+    if not entries:
+        sys.exit("No valid entry in TEST_EXTERNES.")
 
-    # ---------------- Playlists de l'utilisateur ----------------
-    print("Lecture de vos playlists...")
+    # --- 0) ReccoBeats /track: fetch title + artist for "link only" entries (needed for Last.fm)
+    need = [e for e in entries if not e["title"]]
+    if need:
+        content = _reccobeats_get("track", [e["id"] for e in need])
+        if content is not None:
+            print("0) ReccoBeats (track info): OK")
+            by_id = {}
+            for item in content:
+                m = _RB_ID_RE.search(item.get("href", ""))
+                if m:
+                    by_id[m.group(1)] = item
+            for e in need:
+                item = by_id.get(e["id"], {})
+                e["title"] = item.get("trackTitle") or item.get("title") or ""
+                arts = item.get("artists") or []
+                e["artist"] = ", ".join(a.get("name", "") for a in arts if isinstance(a, dict)) if arts else ""
+                if e["title"]:
+                    print(f"   {e['id']} -> {e['title']} — {e['artist'] or '?'}")
+                else:
+                    print(f"   ! {e['id']} unknown to ReccoBeats (force it with 'link | Artist | Title')")
+        else:
+            print("0) ReccoBeats (track info): FAILED after retries — see messages above")
+        print()
+
+    # --- 0bis) Spotify fallback for tracks unknown to ReccoBeats (1 API call per track, no more)
+    still = [e for e in entries if not e["title"]]
+    if still and SPOTIFY_TRACK_FALLBACK:
+        print(f"0bis) Spotify (track-info fallback: only {len(still)} API call(s)):")
+        try:
+            sp_fallback = get_client()
+            for e in still:
+                try:
+                    t = sp_fallback.track(e["id"])
+                except spotipy.exceptions.SpotifyException as ex:
+                    if ex.http_status == 429:
+                        print("   ! Spotify quota exhausted -> fallback abandoned for the remaining tracks")
+                        break
+                    print(f"   ! {e['id']}: Spotify error {ex.http_status}")
+                    continue
+                e["title"] = t.get("name", "")
+                e["artist"] = ", ".join(a.get("name", "") for a in t.get("artists", []))
+                print(f"   {e['id']} -> {e['title']} — {e['artist']}  [source: Spotify]")
+        except Exception as ex:
+            print(f"   ! Spotify connection impossible ({type(ex).__name__}) -> fallback abandoned")
+        print()
+    elif still:
+        print("0bis) Spotify fallback disabled (SPOTIFY_TRACK_FALLBACK=False): "
+              f"{len(still)} track(s) will remain unidentified\n")
+
+    # --- 1) ReccoBeats: BPM in a single batch
+    print("1) ReccoBeats (BPM):")
+    bpm = {}
+    content = _reccobeats_get("audio-features", [e["id"] for e in entries])
+    if content is not None:
+        print("   OK")
+        for item in content:
+            m = _RB_ID_RE.search(item.get("href", ""))
+            if m and item.get("tempo"):
+                bpm[m.group(1)] = round(float(item["tempo"]), 1)
+                _cache["tempos"][m.group(1)] = bpm[m.group(1)]
+    else:
+        print("   ! ReccoBeats FAILED after retries (proxy 401/403/timeout = corporate filtering)")
+
+    # --- 2) Last.fm: per-track tags, then artist tags when the track has none
+    print("\n2) Last.fm (track tags, then artist tags when the track has none):")
+    first = True
+    for e in entries:
+        e["bpm"] = bpm.get(e["id"])
+        if not e["title"] or not e["artist"]:
+            e["tags"], e["tag_src"] = [], "none"
+            print(f"   {e['id']}: skipped (title/artist unknown)")
+            continue
+        main_artist = e["artist"].split(",")[0].strip()  # Last.fm only knows the main artist
+        e["tags"] = get_lastfm_track_tags(main_artist, e["title"], verbose=first)
+        e["tag_src"] = "track"
+        if not e["tags"]:
+            e["tags"] = get_lastfm_artist_tags(main_artist, verbose=first)
+            e["tag_src"] = "artist"
+        first = False
+        print(f"   {e['title']} — {main_artist}: {len(e['tags'])} tag(s) via {e['tag_src']} {e['tags'][:5]}")
+    if all(not e.get("tags") for e in entries):
+        print("   ! no tags at all — see [Last.fm HTTP ...] above: bad key / proxy block / unknown to Last.fm")
+
+    # --- 3) Summary: what the real report would do with it
+    print("\n3) Summary (what the real report would make of it):")
+    for e in entries:
+        bucket = bpm_bucket(e["bpm"])
+        genre = match_category(e["tags"]) if e["tags"] else None
+        print(f"   - {e['title'] or e['id']} — {e['artist'] or '?'}")
+        print(f"       BPM {e['bpm'] if e['bpm'] else '?'} -> {'playlist ' + str(bucket) + ' bpm' if bucket is not None else 'unknown BPM'}")
+        print(f"       Genre -> {genre or 'unidentified'} (tags {e.get('tag_src', '?')}: {'; '.join(e['tags'][:4]) or 'none'})")
+
+    save_cache(force=True)
+    print(f"\nBPMs and tags saved to {CACHE_FILE}: they will be reused by the real run.")
+    print("Test finished — no Spotify API call was made." if not (still and SPOTIFY_TRACK_FALLBACK)
+          else "Test finished — only the track-info fallback touched the Spotify API.")
+
+# ======================================================================================================================
+# REAL DATA GATHERING
+# ======================================================================================================================
+def gather_real_data(sp):
+    """Real collection through the APIs (Spotify/ReccoBeats/Last.fm). Returns everything the analysis needs."""
+    # ---------------- The user's playlists ----------------
+    print("Reading your playlists...")
     all_playlists = get_my_playlists(sp)
+    snapshots = {p["id"]: p.get("snapshot_id") for p in all_playlists}  # for cache invalidation
     bpm_playlists, genre_playlists = {}, {}  # {60: {"id","name"}} / {"Pop": {"id","name"}}
     for p in all_playlists:
         name = p["name"].strip()
@@ -479,113 +642,137 @@ def main():
         elif name in GENRE_PLAYLIST_NAMES:
             genre_playlists[name] = {"id": p["id"], "name": name}
 
-    print(f"  Playlists BPM trouvées   : {sorted(bpm_playlists)}")
-    print(f"  Playlists Genre trouvées : {sorted(genre_playlists)}\n")
+    print(f"  BPM playlists found   : {sorted(bpm_playlists)}")
+    print(f"  Genre playlists found : {sorted(genre_playlists)}\n")
 
-    # --- diagnostic : si rien n'est reconnu, montrer ce que l'API renvoie pour comprendre pourquoi
+    # --- diagnostic: if nothing is recognised, show what the API returns to understand why
     if not bpm_playlists and not genre_playlists:
-        print("!! DIAGNOSTIC : aucune playlist BPM ni Genre reconnue. Voici les noms exacts renvoyés par l'API")
-        print(f"!! ({len(all_playlists)} playlists au total) — comparez avec vos noms attendus :")
+        print(f"!! DIAGNOSTIC: no BPM/Genre playlist recognised — exact API names below ({len(all_playlists)} total):")
         for p in all_playlists:
             print(f"!!   - {p['name']!r} (owner: {p['owner']['id']})")
-        print("!! Causes fréquentes : nom différent (espace, casse, accent), ou autre compte Spotify.\n")
+        print("!! Common causes: different name (space, case, accent), or a different Spotify account.\n")
 
-    # ---------------- Contenu de toutes les playlists concernées ----------------
+    # ---------------- Contents of every relevant playlist ----------------
     contents = {}  # {playlist_name: [tracks]}
     for info in list(bpm_playlists.values()) + list(genre_playlists.values()):
         contents[info["name"]] = get_playlist_tracks(sp, info["id"], snapshots.get(info["id"]))
-        print(f"  {info['name']:<12} : {len(contents[info['name']])} titres")
+        print(f"  {info['name']:<12} : {len(contents[info['name']])} tracks")
 
     source_tracks = get_playlist_tracks(sp, SOURCE_PLAYLIST_ID, snapshots.get(SOURCE_PLAYLIST_ID))
-    print(f"\nPlaylist source : {len(source_tracks)} titres\n")
+    print(f"\nSource playlist: {len(source_tracks)} tracks\n")
     if not source_tracks:
-        print("!! DIAGNOSTIC : la playlist source ne renvoie aucun titre exploitable.")
+        print("!! DIAGNOSTIC: the source playlist returns no usable track.")
         try:
             meta = sp.playlist(SOURCE_PLAYLIST_ID)
             owner = meta.get("owner", {}).get("id", "?")
             total = meta.get("tracks", {}).get("total", "?")
-            print(f"!!   Nom: {meta.get('name')!r} | owner: {owner} | total annoncé: {total}")
-            print(f"!!   Champs renvoyés par l'API : {sorted(meta.keys())}")
+            print(f"!!   Name: {meta.get('name')!r} | owner: {owner} | reported total: {total}")
+            print(f"!!   Fields returned by the API: {sorted(meta.keys())}")
         except Exception as e:
-            print(f"!!   Impossible de lire les métadonnées de la playlist : {e}")
+            print(f"!!   Could not read the playlist metadata: {e}")
         try:
-            raw = sp.playlist_items(SOURCE_PLAYLIST_ID, limit=3)  # ancien endpoint, réponse brute
+            raw = sp.playlist_items(SOURCE_PLAYLIST_ID, limit=3)  # old endpoint, raw response
             items = raw.get("items", [])
-            print(f"!!   Ancien endpoint /tracks : total={raw.get('total', '?')}, items page 1={len(items)}")
+            print(f"!!   Old /tracks endpoint: total={raw.get('total', '?')}, page-1 items={len(items)}")
             for it in items[:2]:
-                print(f"!!     clés de l'item : {sorted(it.keys())}")
-                print(f"!!     extrait brut   : {str(it)[:250]}")
+                print(f"!!     item keys : {sorted(it.keys())}")
+                print(f"!!     raw excerpt: {str(it)[:250]}")
         except Exception as e:
-            print(f"!!   Ancien endpoint /tracks : erreur {e}")
+            print(f"!!   Old /tracks endpoint: error {e}")
         try:
-            raw2 = sp._get(f"playlists/{SOURCE_PLAYLIST_ID}/items", limit=3)  # nouvel endpoint 02/2026
+            raw2 = sp._get(f"playlists/{SOURCE_PLAYLIST_ID}/items", limit=3)  # new 02/2026 endpoint
             items2 = raw2.get("items", [])
-            print(f"!!   Nouvel endpoint /items : total={raw2.get('total', '?')}, items page 1={len(items2)}")
+            print(f"!!   New /items endpoint: total={raw2.get('total', '?')}, page-1 items={len(items2)}")
             for it in items2[:2]:
-                print(f"!!     clés de l'item : {sorted(it.keys())}")
-                print(f"!!     extrait brut   : {str(it)[:250]}")
+                print(f"!!     item keys : {sorted(it.keys())}")
+                print(f"!!     raw excerpt: {str(it)[:250]}")
         except Exception as e:
-            print(f"!!   Nouvel endpoint /items : erreur {e}")
-        print("!!   -> Envoyez ce bloc de diagnostic tel quel pour analyse.\n")
+            print(f"!!   New /items endpoint: error {e}")
+        print("!!   -> Send this diagnostic block as-is for analysis.\n")
 
-    # ---------------- BPM + genres pour TOUS les titres ----------------
+    # ---------------- BPM + genres for ALL tracks ----------------
     all_tracks = {t["id"]: t for t in source_tracks}
     for lst in contents.values():
         for t in lst:
             all_tracks.setdefault(t["id"], t)
 
-    print("Récupération des BPM...")
+    print("Fetching BPMs...")
     tempos = get_tempos(sp, list(all_tracks))
 
-    print("Récupération des genres d'artistes...")
+    print("Fetching artist genres...")
     artist_genres = get_artist_genres(sp, [aid for t in all_tracks.values() for aid in t["artist_ids"]])
     print()
+    return bpm_playlists, genre_playlists, contents, source_tracks, tempos, artist_genres
 
-    # sets d'IDs par playlist pour tester la présence
+# ======================================================================================================================
+# MAIN
+# ======================================================================================================================
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    if TEST_EXTERNES:  # test mode: ReccoBeats + Last.fm only, zero Spotify calls
+        load_cache()
+        run_external_test()
+        return
+    load_cache()
+    sp = get_client()
+    try:
+        me = sp.current_user()
+    except spotipy.exceptions.SpotifyException as e:
+        if e.http_status == 429:
+            quota_exit("authentication")
+        raise
+    print(f"Logged in as: {me['display_name']} ({me['id']})")
+    if LASTFM_API_KEY:
+        print("Per-track genre: Last.fm ACTIVE (primary source), Spotify artist as fallback\n")
+    else:
+        print("WARNING: LASTFM_API_KEY missing -> genre via Spotify artists only (free key: last.fm/api/account/create)\n")
+    bpm_playlists, genre_playlists, contents, source_tracks, tempos, artist_genres = gather_real_data(sp)
+
+    # per-playlist ID sets to test membership
     ids_in = {name: {t["id"] for t in lst} for name, lst in contents.items()}
 
     # =====================================================================
-    # 1) PROPOSITIONS D'AJOUT pour la playlist source
+    # 1) SUGGESTED ADDITIONS for the source playlist
     # =====================================================================
     rows_add = []
-    to_create_bpm = defaultdict(list)       # {bucket: [titres]} -> playlists BPM à créer
-    to_create_genre = defaultdict(list)     # {genre: [titres]}  -> playlists Genre à créer
-    unknown_genre_tags = defaultdict(list)  # {genre/tag brut: [titres]} non mappés
+    to_create_bpm = defaultdict(list)       # {bucket: [tracks]} -> BPM playlists to create
+    to_create_genre = defaultdict(list)     # {genre: [tracks]}  -> Genre playlists to create
+    unknown_genre_tags = defaultdict(list)  # {raw genre/tag: [tracks]} unmapped
     print("=" * 100)
-    print("1) TITRES DE LA PLAYLIST SOURCE -> AJOUTS PROPOSÉS")
+    print("1) SOURCE PLAYLIST TRACKS -> SUGGESTED ADDITIONS")
     print("=" * 100)
     for t in source_tracks:
         tempo = tempos.get(t["id"])
         bucket = bpm_bucket(tempo)
         genre, raw_genres, genre_src = resolve_genre(t, artist_genres)
 
-        # --- cible BPM
+        # --- BPM target
         if tempo is None:
-            bpm_action = "BPM inconnu (à vérifier manuellement)"
+            bpm_action = "unknown BPM (check manually)"
         elif bucket in bpm_playlists:
             pname = bpm_playlists[bucket]["name"]
-            bpm_action = f"déjà dans '{pname}'" if t["id"] in ids_in.get(pname, set()) else f"AJOUTER à '{pname}'"
+            bpm_action = f"already in '{pname}'" if t["id"] in ids_in.get(pname, set()) else f"ADD to '{pname}'"
         else:
-            bpm_action = f"CRÉER la playlist '{bucket} bpm' puis y ajouter ce titre"
+            bpm_action = f"CREATE playlist '{bucket} bpm' then add this track"
             to_create_bpm[bucket].append(f"{t['name']} — {t['artists']}")
 
         alt = ""
         if SHOW_HALF_DOUBLE_TEMPO and tempo:
             alts = [f"{x} bpm" for x in {bpm_bucket(tempo / 2), bpm_bucket(tempo * 2)} - {bucket} if x in bpm_playlists]
             if alts:
-                alt = f" (alternative demi/double tempo : {', '.join(alts)})"
+                alt = f" (half/double-tempo alternative: {', '.join(alts)})"
 
-        # --- cible Genre
+        # --- Genre target
         if genre is None:
-            genre_action = f"genre non identifié ({'; '.join(raw_genres[:3]) or 'aucune info Spotify ni Last.fm'})"
+            genre_action = f"unidentified genre ({'; '.join(raw_genres[:3]) or 'no Spotify or Last.fm info'})"
             for g in raw_genres:
                 unknown_genre_tags[g].append(f"{t['name']} — {t['artists']}")
         elif genre in genre_playlists:
             pname = genre_playlists[genre]["name"]
-            base = f"déjà dans '{pname}'" if t["id"] in ids_in.get(pname, set()) else f"AJOUTER à '{pname}'"
+            base = f"already in '{pname}'" if t["id"] in ids_in.get(pname, set()) else f"ADD to '{pname}'"
             genre_action = f"{base} [source: {genre_src}]"
         else:
-            genre_action = f"CRÉER la playlist '{genre}' puis y ajouter ce titre [source: {genre_src}]"
+            genre_action = f"CREATE playlist '{genre}' then add this track [source: {genre_src}]"
             to_create_genre[genre].append(f"{t['name']} — {t['artists']}")
 
         print(f"- {t['name']} — {t['artists']}")
@@ -594,11 +781,11 @@ def main():
         rows_add.append([t["name"], t["artists"], tempo, bucket, bpm_action, genre or "?", genre_src, genre_action, "; ".join(raw_genres[:5])])
 
     # =====================================================================
-    # 2) TITRES POTENTIELLEMENT MAL PLACÉS
+    # 2) POTENTIALLY MISPLACED TRACKS
     # =====================================================================
     rows_misplaced = []
     print("\n" + "=" * 100)
-    print("2) TITRES POTENTIELLEMENT MAL PLACÉS DANS VOS PLAYLISTS")
+    print("2) POTENTIALLY MISPLACED TRACKS IN YOUR PLAYLISTS")
     print("=" * 100)
 
     for bucket_val, info in sorted(bpm_playlists.items()):
@@ -607,30 +794,30 @@ def main():
             if tempo is None:
                 continue
             real = bpm_bucket(tempo)
-            # tolérance : ok si le bucket exact OU la version demi/double tempo correspond
+            # tolerance: fine if the exact bucket OR the half/double-tempo version matches
             if real == bucket_val or bpm_bucket(tempo / 2) == bucket_val or bpm_bucket(tempo * 2) == bucket_val:
                 continue
             dest = bpm_playlists.get(real)
-            dest_name = dest["name"] if dest else f"{real} bpm (n'existe pas)"
-            print(f"- [{info['name']}] {t['name']} — {t['artists']} : BPM mesuré {tempo} -> DÉPLACER vers '{dest_name}'")
+            dest_name = dest["name"] if dest else f"{real} bpm (does not exist)"
+            print(f"- [{info['name']}] {t['name']} — {t['artists']}: measured BPM {tempo} -> MOVE to '{dest_name}'")
             rows_misplaced.append([info["name"], t["name"], t["artists"], tempo, dest_name, "BPM"])
 
     for gname, info in sorted(genre_playlists.items()):
         for t in contents[info["name"]]:
             genre, raw, src = resolve_genre(t, artist_genres)
             if genre and genre != gname:
-                print(f"- [{gname}] {t['name']} — {t['artists']} : genre estimé '{genre}' via {src} ({'; '.join(raw[:3])}) -> à vérifier")
+                print(f"- [{gname}] {t['name']} — {t['artists']}: estimated genre '{genre}' via {src} ({'; '.join(raw[:3])}) -> double-check")
                 rows_misplaced.append([gname, t["name"], t["artists"], "; ".join(raw[:5]), genre, f"Genre ({src})"])
 
     if not rows_misplaced:
-        print("Rien à signaler.")
+        print("Nothing to report.")
 
     # =====================================================================
-    # 3) DOUBLONS
+    # 3) DUPLICATES
     # =====================================================================
     rows_dupes = []
     print("\n" + "=" * 100)
-    print("3) DOUBLONS À L'INTÉRIEUR DE CHAQUE PLAYLIST")
+    print("3) DUPLICATES INSIDE EACH PLAYLIST")
     print("=" * 100)
     for pname, lst in contents.items():
         seen_id, seen_name = defaultdict(int), defaultdict(int)
@@ -640,41 +827,37 @@ def main():
         for t in lst:
             key = (t["name"].lower(), t["artists"].lower())
             if seen_id[t["id"]] > 1 or seen_name[key] > 1:
-                reason = f"même titre présent {seen_id[t['id']]}x" if seen_id[t["id"]] > 1 else "même nom+artiste (versions/ID différents)"
-                print(f"- [{pname}] {t['name']} — {t['artists']} : {reason} -> SUPPRIMER le doublon")
+                reason = f"same track present {seen_id[t['id']]}x" if seen_id[t["id"]] > 1 else "same name+artist (different versions/IDs)"
+                print(f"- [{pname}] {t['name']} — {t['artists']}: {reason} -> DELETE the duplicate")
                 rows_dupes.append([pname, t["name"], t["artists"], reason])
-                seen_id[t["id"]], seen_name[key] = 1, 1  # n'afficher qu'une fois
+                seen_id[t["id"]], seen_name[key] = 1, 1  # show only once
     if not rows_dupes:
-        print("Aucun doublon détecté.")
+        print("No duplicates detected.")
 
     # =====================================================================
-    # 4) PLAYLISTS À CRÉER (BPM manquants / genres manquants)
+    # 4) PLAYLISTS TO CREATE (missing BPMs / missing genres)
     # =====================================================================
     rows_create = []
     print("\n" + "=" * 100)
-    print("4) PLAYLISTS À CRÉER (proposition)")
+    print("4) PLAYLISTS TO CREATE (suggestion)")
     print("=" * 100)
-    for bucket_val in sorted(to_create_bpm):
-        print(f"- '{bucket_val} bpm' : {len(to_create_bpm[bucket_val])} titre(s) en attente")
-        for x in to_create_bpm[bucket_val]:
+    for label, kind, pending in ([(f"{b} bpm", "BPM", to_create_bpm[b]) for b in sorted(to_create_bpm)]
+                                 + [(g, "Genre", to_create_genre[g]) for g in sorted(to_create_genre)]):
+        print(f"- '{label}': {len(pending)} pending track(s)")
+        for x in pending:
             print(f"      . {x}")
-            rows_create.append([f"{bucket_val} bpm", "BPM", x])
-    for gname in sorted(to_create_genre):
-        print(f"- '{gname}' : {len(to_create_genre[gname])} titre(s) en attente")
-        for x in to_create_genre[gname]:
-            print(f"      . {x}")
-            rows_create.append([gname, "Genre", x])
+            rows_create.append([label, kind, x])
     if not rows_create:
-        print("Vos playlists existantes couvrent tous les titres analysés.")
+        print("Your existing playlists cover every analysed track.")
 
     if unknown_genre_tags:
-        print("\nGenres/tags rencontrés mais non mappés vers vos catégories (triés par fréquence — utile pour décider d'une")
-        print("éventuelle nouvelle playlist 'grosse maille', ou pour enrichir GENRE_RULES) :")
+        print("\nGenres/tags encountered but not mapped to your categories (sorted by frequency — useful to decide")
+        print("on a possible new coarse-grained playlist, or to enrich GENRE_RULES):")
         for g, titles in sorted(unknown_genre_tags.items(), key=lambda kv: len(kv[1]), reverse=True)[:15]:
-            print(f"  - '{g}' : {len(titles)} titre(s)  ex: {titles[0]}")
+            print(f"  - '{g}': {len(titles)} track(s)  e.g. {titles[0]}")
 
     # =====================================================================
-    # EXPORT CSV
+    # CSV EXPORT
     # =====================================================================
     def write_csv(fname, header, rows):
         path = os.path.join(OUTPUT_DIR, fname)
@@ -684,14 +867,15 @@ def main():
             w.writerows(rows)
         print(f"  -> {path}")
 
-    print("\nExport des rapports CSV :")
-    write_csv("1_ajouts_proposes.csv", ["Titre", "Artistes", "BPM", "Bucket BPM", "Action BPM", "Genre estimé",
-                                        "Source genre", "Action Genre", "Genres/tags bruts"], rows_add)
-    write_csv("2_mal_places.csv", ["Playlist actuelle", "Titre", "Artistes", "Mesure", "Destination suggérée", "Type"], rows_misplaced)
-    write_csv("3_doublons.csv", ["Playlist", "Titre", "Artistes", "Raison"], rows_dupes)
-    write_csv("4_playlists_a_creer.csv", ["Playlist à créer", "Type", "Titre en attente"], rows_create)
+    print("\nExporting CSV reports:")
+    write_csv("1_suggested_additions.csv", ["Title", "Artists", "BPM", "BPM bucket", "BPM action", "Estimated genre",
+                                            "Genre source", "Genre action", "Raw genres/tags"], rows_add)
+    write_csv("2_misplaced.csv", ["Current playlist", "Title", "Artists", "Measurement", "Suggested destination", "Type"], rows_misplaced)
+    write_csv("3_duplicates.csv", ["Playlist", "Title", "Artists", "Reason"], rows_dupes)
+    write_csv("4_playlists_to_create.csv", ["Playlist to create", "Type", "Pending track"], rows_create)
 
-    print("\nTerminé. Aucune modification n'a été faite sur votre compte (dry-run).")
+    save_cache(force=True)
+    print("\nDone. Nothing was modified on your account (dry-run).")
 
 if __name__ == "__main__":
     main()
