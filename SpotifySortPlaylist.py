@@ -83,7 +83,6 @@ MAX_LOCAL_MATCH_PER_RUN = 700   # Spotify allows ~750 calls/day; 0 = no cap (one
 LOCAL_MATCH_PACE = 0.8          # seconds between two searches (Spotify punishes bursts)
 
 INCLUDE_LIKED_SONGS = False     # also sort your "Liked Songs" library (adds ~1 call per 50 liked)
-
 ANALYZE_DEEZER_PREVIEWS = False # measure missing BPMs from 30 s previews (slow; installs librosa)
 
 # TEST MODE - paste track links here (right-click a track > Share > Copy link) to test the external APIs
@@ -115,7 +114,7 @@ GENRE_RULES = [
     ("Rock",       ["rock", "metal", "punk", "grunge", "emo", "screamo", "hardcore", "shoegaze", "garage", "blues", "new wave", "rock opera"]),
     ("SoundTrack", ["soundtrack", "film score", "game music", "video game music", "anime", "ost",
                     "bande originale", "film music", "theme song", "composer"]),
-    ("FranÃ§aise",  ["french", "chanson", "variete francaise", "variÃ©tÃ© franÃ§aise", "francoton"]),
+    ("Française",  ["french", "chanson", "variete francaise", "variété française", "francoton"]),
     ("Pop",        ["pop", "indie", "singer-songwriter", "synthpop", "britpop", "folk", "country", "americana", "baroque pop", "chamber pop"]),  # catch-all, keep last
 ]
 
