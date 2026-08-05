@@ -128,11 +128,43 @@ per file (normal fields, swapped fields for inverted MP3 tags, then free text) �
 fully actionable for a future "apply changes" step. Matches and misses are both cached, so this search is
 only ever paid once per file.
 
-## What this script does *not* do (yet)
+## Applying the changes (phase 2)
 
-This is purely an analysis tool. It never creates a playlist, adds a track, or deletes a duplicate — it only
-tells you what *should* happen. Turning that into actual changes (with your confirmation at every step) is a
-natural next step, not yet built.
+A plain run is always read-only. To actually change your library, there are three steps:
+
+1. **Analyse** — `python spotify_tri_playlists.py` as usual. Besides the CSVs, it now also writes
+   `rapport_spotify/report.json`: every proposed change, split into **confident** (safe measurements/matches,
+   no call needed) and **needs your call**, grouped by *why* it's uncertain (genre guessed from the artist
+   only, a fuzzy local-file match, a close genre vote, a possible real duplicate, etc.).
+2. **Review** — open `review_interface.html` (double-click, no server, no install) and click "Load
+   report.json". Approve or skip each group in bulk, with the option to except a few individual tracks.
+   Decide which not-yet-existing playlists (140 bpm, SoundTrack...) are worth creating. Click "Export
+   decisions" — this downloads `decisions.json` to your Downloads folder.
+3. **Apply** — `python spotify_tri_playlists.py --apply`. It re-checks your library fresh (fast, thanks to
+   the cache), applies your decisions, and shows a **full preview** of every playlist to create, track to
+   add, move, or remove — grouped and counted. Nothing is written until you type `yes` at the single
+   confirmation prompt that follows.
+
+Before the preview, `--apply` also tells you how long ago the decisions were exported and, if a newer
+`report.json` has been generated since (say you re-ran the analysis after exporting), flags it clearly.
+This is a heads-up, not a block — your approvals are matched by group and track id, not a frozen snapshot,
+so they still apply correctly either way; it's just a prompt to re-review if enough changed since.
+
+Why re-check fresh instead of trusting the earlier report? So the tool is naturally resilient: if `--apply`
+gets interrupted (daily quota, closed terminal), just running it again picks up exactly where it left off —
+already-applied changes are recognised as done and skipped, nothing is ever double-applied.
+
+**A few things worth knowing about apply mode:**
+- It only ever *adds*, *creates*, or *removes exact duplicate/misplaced entries* — it never deletes a
+  playlist, and it never touches a track that isn't part of an action you approved.
+- Local files without a matched catalog equivalent still can't be acted on directly (the API has no way to
+  add/move a raw MP3) — they stay a manual, drag-and-drop job.
+- The review interface only ships a handful of sample tracks per group (to stay lightweight); a group
+  decision applies to *every* track in it, with exceptions limited to the tracks you can see and un-tick.
+- This write path is thoroughly unit-tested against a simulated Spotify client, but — unlike the read-only
+  analysis, exercised for real over many runs — it has not been exercised against the live API. For your
+  first `--apply`, consider approving something small first (the exact-ID duplicates are the lowest-risk
+  starting point) before doing a full run.
 
 ## Troubleshooting
 
