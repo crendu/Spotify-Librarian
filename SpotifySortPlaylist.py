@@ -11,7 +11,7 @@ WHAT THIS SCRIPT DOES (read-only: it never modifies your Spotify account)
 HOW TO RUN
     1. Have Python 3. Missing libraries install themselves on first run.
     2. Fill the CONFIG block below (the lines marked with an alert comment).
-    3. python spotify_tri_playlists.py   (first full run takes ~1 h; later runs are fast thanks to the cache)
+    3. python SpotifySortPlaylist.py   (first full run takes ~1 h; later runs are fast thanks to the cache)
 
 GOOD TO KNOW
   - BPM comes from ReccoBeats, then Deezer (Spotify closed its own endpoint to new apps).
@@ -77,16 +77,17 @@ LASTFM_API_KEY        = "XXX" # /!\ - main genre source; "" = run without it
 # ----------------------------------------------------------------------------------------------------------------------
 # ZONE 2 - CHECK THESE (your environment and what this run should do)
 # ----------------------------------------------------------------------------------------------------------------------
-PROXY_URL = ""                  # /!\ - office proxy; set "" when running from home
-USE_SYSTEM_CERTS = True         # keep True on a corporate Windows machine (SSL-inspecting proxy)
+PROXY_URL = ""                              # /!\ - office proxy; set "" when running from home
+USE_SYSTEM_CERTS = True                     # Keep True on a corporate Windows machine (SSL-inspecting proxy)
 
-INCLUDE_LOCAL_FILES = True      # analyse the imported MP3s too (sorted by their name tags)
-MATCH_LOCAL_FILES = True        # find their Spotify catalog equivalent (makes them actionable)
-MAX_LOCAL_MATCH_PER_RUN = 700   # Spotify allows ~750 calls/day; 0 = no cap (one big run)
-LOCAL_MATCH_PACE = 0.8          # seconds between two searches (Spotify punishes bursts)
+INCLUDE_LOCAL_FILES = True                  # Analyse the imported MP3s too (sorted by their name tags)
+MATCH_LOCAL_FILES = True                    # Find their Spotify catalog equivalent (makes them actionable)
+MAX_LOCAL_MATCH_PER_RUN = 700               # Spotify allows ~750 calls/day; 0 = no cap (one big run)
+LOCAL_MATCH_PACE = 0.8                      # Seconds between two searches (Spotify punishes bursts)
 
-INCLUDE_LIKED_SONGS = False     # also sort your "Liked Songs" library (adds ~1 call per 50 liked)
-ANALYZE_DEEZER_PREVIEWS = False # measure missing BPMs from 30 s previews (slow; installs librosa)
+ANALYZE_DEEZER_PREVIEWS = False             # Measure missing BPMs from 30 s previews (slow; installs librosa)
+CHECK_ALL_PLAYLISTS_FOR_DUPLICATES = False  # Turning this on also checks every OTHER playlist YOU OWN
+INCLUDE_LIKED_SONGS = False                 # Also sort your "Liked Songs" library (adds ~1 call per 50 liked)
 
 # TEST MODE - paste track links here (right-click a track > Share > Copy link) to test the external APIs
 # without touching Spotify. Non-empty list = run the test only, then stop. Results are cached.
@@ -283,7 +284,7 @@ def validate_config(require_spotify=True):
         if not re.fullmatch(r"[0-9a-f]{32}", SPOTIFY_CLIENT_ID or ""):
             problems.append(
                 f"SPOTIFY_CLIENT_ID looks wrong: the script found {SPOTIFY_CLIENT_ID!r},\n"
-                f"    but a real Client ID is 32 letters/digits, like 6a905271bd724376a51cae10e31dd4da.\n"
+                f"    but a real Client ID is 32 letters/digits, like a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4.\n"
                 f"    FIX: open https://developer.spotify.com/dashboard > your app > Settings,\n"
                 f"         copy the Client ID and paste it in the CONFIG block at the top of this file.")
         if not re.fullmatch(r"[0-9a-f]{32}", SPOTIFY_CLIENT_SECRET or ""):
@@ -404,20 +405,35 @@ def get_playlist_tracks(sp, playlist_id, snapshot_id=None):
         save_cache(force=True)  # every fully-read playlist is immediately secured on disk
     return tracks
 
+def _liked_songs_failure(e, read_so_far):
+    note = "quota exhausted" if getattr(e, "http_status", None) == 429 else type(e).__name__
+    extra = f" -> keeping the {read_so_far} already read" if read_so_far else " -> continuing without them"
+    print(f"  ! Liked Songs unavailable ({note}){extra}. This is an optional extra, not the main source -\n"
+          f"    the rest of the analysis (your playlists, the source playlist) is unaffected.", file=sys.stderr)
+
 def get_liked_tracks(sp):
-    """Reads the user's "Liked Songs" library (50 per call). Cached, invalidated when the liked count
-    changes. Coded defensively: if the endpoint is unavailable, the run continues without liked songs."""
+    """Reads the user's "Liked Songs" library (50 per call). Cached, invalidated when the liked count changes.
+    Deliberately NEVER stops the whole run (no spotify_call/quota_exit here): Liked Songs is an optional extra, so any failure
+    just skips or truncates it and moves on, keeping everything else (already fetched from cache) intact."""
     global _cache_dirty
     try:
-        first = spotify_call(lambda: sp.current_user_saved_tracks(limit=50), "liked songs")
-    except spotipy.exceptions.SpotifyException as e:
-        print(f"  ! Liked Songs unavailable ({e.http_status}) -> continuing without them", file=sys.stderr)
+        first = sp.current_user_saved_tracks(limit=50)
+    except (spotipy.exceptions.SpotifyException, requests.exceptions.RequestException) as e:
+        _liked_songs_failure(e, 0)
         return []
     total = first.get("total", 0)
     cached = _cache["playlists"].get("__liked__")
     if cached and cached.get("snapshot_id") == str(total):
         return [dict(t) for t in cached["tracks"]]
-    items = fetch_all(sp, first, "liked songs")
+    items, page = list(first.get("items", [])), first
+    try:
+        while page.get("next"):
+            page = sp.next(page)
+            items.extend(page.get("items", []))
+    except (spotipy.exceptions.SpotifyException, requests.exceptions.RequestException) as e:
+        tracks = _parse_playlist_items(items)
+        _liked_songs_failure(e, len(tracks))
+        return tracks  # partial read: not cached as "complete", so a later run finishes the job
     tracks = _parse_playlist_items(items)
     _cache["playlists"]["__liked__"] = {"snapshot_id": str(total), "tracks": [dict(t) for t in tracks]}
     _cache_dirty += 1
@@ -1139,7 +1155,7 @@ def match_local_tracks(sp, tracks):
 # ======================================================================================================================
 # REAL DATA GATHERING
 # ======================================================================================================================
-def gather_real_data(sp):
+def gather_real_data(sp, user_id):
     """Reads everything the analysis needs: your playlists, the source tracks, the local-file matches, the BPMs and the artist genres.
     Returns it all to main()."""
     # ---------------- The user's playlists ----------------
@@ -1175,13 +1191,13 @@ def gather_real_data(sp):
         print(f"  {info['name']:<12} : {len(contents[info['name']])} tracks")
 
     source_tracks = get_playlist_tracks(sp, SOURCE_PLAYLIST_ID, snapshots.get(SOURCE_PLAYLIST_ID))
-    print(f"\nSource playlist: {len(source_tracks)} tracks")
-    if INCLUDE_LIKED_SONGS:
-        seen = {t["id"] for t in source_tracks}
-        liked = [dict(t, liked=True) for t in get_liked_tracks(sp) if t["id"] not in seen]
-        source_tracks.extend(liked)
-        print(f"Liked songs added: {len(liked)} (not already in the source)")
-    print()
+    print(f"\nSource playlist: {len(source_tracks)} tracks\n")
+    src_meta = next((p for p in all_playlists if p["id"] == SOURCE_PLAYLIST_ID), None)
+    source_name = src_meta["name"] if src_meta else "Source playlist"
+    content_ids = {info["name"]: info["id"] for info in list(bpm_playlists.values()) + list(genre_playlists.values())}
+    contents[source_name] = list(source_tracks)  # a COPY: duplicate-checking must ignore the liked-songs merge below
+    content_ids[source_name] = SOURCE_PLAYLIST_ID
+
     if not source_tracks:
         print("!! DIAGNOSTIC: the source playlist returns no usable track.")
         try:
@@ -1213,10 +1229,41 @@ def gather_real_data(sp):
         print("!!   -> Send this diagnostic block as-is for analysis.\n")
 
     # ---------------- Local files: find their Spotify catalog equivalents ----------------
+    # Runs BEFORE the optional add-ons below (Liked Songs, extra-playlist duplicate scan): local matching is the biggest
+    # and most valuable backlog, so on a quota-limited day it gets first claim on what's left, instead of being starved
+    # by add-ons that would otherwise spend the day's budget first.
     every = list(source_tracks)
     for lst in contents.values():
         every.extend(lst)
     match_local_tracks(sp, every)
+
+    # ---------------- Optional add-ons: Liked Songs, then duplicate-scan of every other owned playlist ----------------
+    # Both only add value on top of the core sort; neither should cost you progress on the above if the daily quota runs
+    # out here - Liked Songs already degrades gracefully, and the loop below is wrapped the same way.
+    if INCLUDE_LIKED_SONGS:
+        seen = {t["id"] for t in source_tracks}
+        liked = [dict(t, liked=True) for t in get_liked_tracks(sp) if t["id"] not in seen]
+        source_tracks.extend(liked)
+        print(f"Liked songs added: {len(liked)} (not already in the source)")
+
+    if CHECK_ALL_PLAYLISTS_FOR_DUPLICATES:
+        already = set(content_ids.values())
+        extra = [p for p in all_playlists if p["id"] not in already and p.get("owner", {}).get("id") == user_id]
+        if extra:
+            print(f"Also checking {len(extra)} other playlist(s) you own for duplicates...")
+            read = 0
+            try:
+                for p in extra:
+                    name = p["name"].strip() or p["id"]
+                    contents[name] = get_playlist_tracks(sp, p["id"], snapshots.get(p["id"]))
+                    content_ids[name] = p["id"]
+                    read += 1
+            except SystemExit:
+                # an optional add-on: a 429 here keeps what was already read (still checked for duplicates)
+                # and lets the rest of the analysis proceed normally, instead of ending the whole run.
+                print(f"  ! Stopped after {read}/{len(extra)} (quota) - the rest will be checked next run.",
+                      file=sys.stderr)
+    print()
 
     # ---------------- BPM + genres for ALL tracks ----------------
     all_tracks = {t["id"]: t for t in source_tracks}
@@ -1230,7 +1277,7 @@ def gather_real_data(sp):
     print("Fetching artist genres...")
     artist_genres = get_artist_genres(sp, [aid for t in all_tracks.values() for aid in t["artist_ids"]])
     print()
-    return bpm_playlists, genre_playlists, contents, source_tracks, tempos, measured_locally, artist_genres
+    return bpm_playlists, genre_playlists, contents, content_ids, source_tracks, tempos, measured_locally, artist_genres
 
 # ======================================================================================================================
 # MAIN
@@ -1416,11 +1463,10 @@ def main(apply_mode=False):
         print("Per-track genre: Last.fm ACTIVE (primary source), Spotify artist as fallback\n")
     else:
         print("WARNING: LASTFM_API_KEY missing -> genre via Spotify artists only (free key: last.fm/account/create)\n")
-    bpm_playlists, genre_playlists, contents, source_tracks, tempos, measured_locally, artist_genres = gather_real_data(sp)
+    bpm_playlists, genre_playlists, contents, playlist_id_by_name, source_tracks, tempos, measured_locally, artist_genres = gather_real_data(sp, me["id"])
 
     # per-playlist ID sets to test membership
     ids_in = {name: {t["id"] for t in lst} for name, lst in contents.items()}
-    playlist_id_by_name = {info["name"]: info["id"] for info in list(bpm_playlists.values()) + list(genre_playlists.values())}
     actions = []  # every proposed change, tagged confident/review - see ACTION CLASSIFICATION above
 
     # =====================================================================

@@ -91,7 +91,7 @@ cache/output paths. Only touch these to change how the classifier *thinks*.
 ## Running it
 
 ```bash
-python spotify_tri_playlists.py
+python SpotifySortPlaylist.py
 ```
 
 The first run authenticates through your browser (one-time), then reads your playlists and starts fetching
@@ -132,7 +132,7 @@ only ever paid once per file.
 
 A plain run is always read-only. To actually change your library, there are three steps:
 
-1. **Analyse** — `python spotify_tri_playlists.py` as usual. Besides the CSVs, it now also writes
+1. **Analyse** — `python SpotifySortPlaylist.py` as usual. Besides the CSVs, it now also writes
    `rapport_spotify/report.json`: every proposed change, split into **confident** (safe measurements/matches,
    no call needed) and **needs your call**, grouped by *why* it's uncertain (genre guessed from the artist
    only, a fuzzy local-file match, a close genre vote, a possible real duplicate, etc.).
@@ -140,7 +140,7 @@ A plain run is always read-only. To actually change your library, there are thre
    report.json". Approve or skip each group in bulk, with the option to except a few individual tracks.
    Decide which not-yet-existing playlists (140 bpm, SoundTrack...) are worth creating. Click "Export
    decisions" — this downloads `decisions.json` to your Downloads folder.
-3. **Apply** — `python spotify_tri_playlists.py --apply`. It re-checks your library fresh (fast, thanks to
+3. **Apply** — `python SpotifySortPlaylist.py --apply`. It re-checks your library fresh (fast, thanks to
    the cache), applies your decisions, and shows a **full preview** of every playlist to create, track to
    add, move, or remove — grouped and counted. Nothing is written until you type `yes` at the single
    confirmation prompt that follows.

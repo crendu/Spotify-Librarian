@@ -1,0 +1,22 @@
+# Secrets and session data — never commit these, even accidentally.
+# If a real value ever ends up in a commit, treat it as compromised: rotate the key/secret,
+# deleting the file afterwards does NOT remove it from git history.
+.spotify_token_cache
+
+# The project's local memory (BPMs, tags, local-file matches, playlist snapshots) — yours only,
+# and large enough that it doesn't belong in version control anyway.
+cache_spotify_tri.json
+
+# Generated reports and your review decisions — regenerate them anytime by re-running the script.
+rapport_spotify/
+decisions.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
