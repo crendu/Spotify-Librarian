@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Spotify playlist analysis (DRY-RUN only - read scopes, nothing is modified):
-  1) suggested BPM/Genre playlist for each source track
-  2) misplaced tracks
-  3) duplicates
-  4) playlists to create.
-Report: console + CSV.
+WHAT THIS SCRIPT DOES (read-only: it never modifies your Spotify account)
+  Reads your playlists, then prints + exports 4 CSV reports:
+    1. where each track of the source playlist should go (one "XX bpm" playlist + one genre playlist)
+    2. tracks that look misplaced in your existing playlists
+    3. duplicates inside each playlist
+    4. playlists worth creating (with the tracks waiting for them)
 
-Setup: pip install spotipy requests | app on developer.spotify.com/dashboard (Redirect URI
-http://127.0.0.1:8888/callback) | fill the CONFIG block (env vars usable as fallback).
+HOW TO RUN
+    1. Have Python 3. Missing libraries install themselves on first run.
+    2. Fill the CONFIG block below (the lines marked with an alert comment).
+    3. python spotify_tri_playlists.py   (first full run takes ~1 h; later runs are fast thanks to the cache)
 
-BPM:
-    Spotify /audio-features is dead for post-2024 apps -> ReccoBeats fallback;
-    missing -> "unknown BPM".
-Genre cascade (Spotify has no per-track genre):
-    Last.fm track tags -> Last.fm
-    artist tags -> Spotify artist genres;
-    each suggestion states its source. Heuristic - double-check.
-Quota:
-    a disk cache (playlists by snapshot_id, BPMs, tags) makes every re-run incremental
-    an interrupted run resumes where it left off.
+GOOD TO KNOW
+  - BPM comes from ReccoBeats, then Deezer (Spotify closed its own endpoint to new apps).
+  - Genre comes from Last.fm tags (track, then artist), then iTunes. Every verdict states its source.
+  - Everything fetched is saved in a local cache file: an interrupted run resumes where it stopped,
+    and nothing is ever downloaded twice. Do not delete the cache file.
 """
 
 import csv
@@ -28,105 +25,145 @@ import json
 import os
 import re
 import sys
+import logging
 import time
 from collections import defaultdict
-
-import logging
 
 import requests
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
-logging.getLogger("spotipy").setLevel(logging.CRITICAL)  # its raw "HTTP Error..." lines are replaced by our own
+logging.getLogger("spotipy").setLevel(logging.CRITICAL)
+
+def _ensure_package(module, pip_name=None):
+    """Imports a package; if missing, installs it with pip first. Returns the module, or None when the install failed - the caller then runs without that feature."""
+    import importlib
+    import subprocess
+    try:
+        return importlib.import_module(module)
+    except ImportError:
+        pkg = pip_name or module
+        print(f"INFO: python package '{pkg}' missing -> installing it now ({sys.executable} -m pip install {pkg})")
+        for extra in ([], ["--user"]):  # plain install first, then per-user (machines without admin rights)
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", *extra, pkg])
+                return importlib.import_module(module)
+            except (subprocess.CalledProcessError, OSError):
+                continue
+            except ImportError:
+                break
+        print(f"! automatic install of '{pkg}' failed -> install it manually: "
+              f"{sys.executable} -m pip install {pkg}", file=sys.stderr)
+        return None
 
 # ======================================================================================================================
-# CONFIG - EVERYTHING IS SET HERE
+# CONFIG - three zones, from "must edit" to "leave as-is":
+#   ZONE 1 - FILL THESE  : the script cannot work without them.
+#   ZONE 2 - CHECK THESE : depends on where and how you run (office/home, local files, quota, options).
+#   ZONE 3 - FINE AS-IS  : behaviour tuning; only touch to change how the sorting THINKS.
 # ======================================================================================================================
 
-# --- 1) SPOTIFY CREDENTIALS (mandatory) -> https://developer.spotify.com/dashboard :
-#        create an app, copy Client ID / Client Secret, and register a Redirect URI EXACTLY equal to the one below.
+# ----------------------------------------------------------------------------------------------------------------------
+# ZONE 1 - FILL THESE (Create the app on https://developer.spotify.com/dashboard, Redirect URI below; free Last.fm key on https://www.last.fm/api/account/create)
+# ----------------------------------------------------------------------------------------------------------------------
 SPOTIFY_CLIENT_ID     = "XXX" # /!\
 SPOTIFY_CLIENT_SECRET = "XXX" # /!\
-SPOTIFY_REDIRECT_URI  = "http://127.0.0.1:8888/callback"
+SOURCE_PLAYLIST_ID    = "XXX" # /!\ - the playlist to sort (22 chars from its link)
+LASTFM_API_KEY        = "XXX" # /!\ - main genre source; "" = run without it
 
-# --- 2) LAST.FM KEY (strongly recommended: primary source of the PER-TRACK genre; without it we fall back to Spotify artist genres).
-#        Free key: https://www.last.fm/api/account/create
-LASTFM_API_KEY = "XXX" # /!\
+# ----------------------------------------------------------------------------------------------------------------------
+# ZONE 2 - CHECK THESE (your environment and what this run should do)
+# ----------------------------------------------------------------------------------------------------------------------
+PROXY_URL = ""                  # /!\ - office proxy; set "" when running from home
+USE_SYSTEM_CERTS = True         # keep True on a corporate Windows machine (SSL-inspecting proxy)
 
-# --- 3) PLAYLISTS
-SOURCE_PLAYLIST_ID = "XXX" # /!\
-INCLUDE_LOCAL_FILES = True
+INCLUDE_LOCAL_FILES = True      # analyse the imported MP3s too (sorted by their name tags)
+MATCH_LOCAL_FILES = True        # find their Spotify catalog equivalent (makes them actionable)
+MAX_LOCAL_MATCH_PER_RUN = 700   # Spotify allows ~750 calls/day; 0 = no cap (one big run)
+LOCAL_MATCH_PACE = 0.8          # seconds between two searches (Spotify punishes bursts)
 
-# --- 4) BPM SETTINGS - X0-X9 buckets: an 87 bpm track goes to "80 bpm", a 154 bpm track goes to "150 bpm" (truncated to the lower ten)
-BPM_STEP = 10
-# A track measured at 154 bpm can also "feel" like 77: show the half/double-tempo alternative in the report.
-SHOW_HALF_DOUBLE_TEMPO = True
+INCLUDE_LIKED_SONGS = False     # also sort your "Liked Songs" library (adds ~1 call per 50 liked)
 
-# --- 5) GENRE RULES (coarse) - exact Spotify playlist names (keep them in French!) + lowercase keywords matched against Last.fm tags / Spotify genres.
-#        Order = priority, first match wins. Style beats language: French rap -> Rap; "Française" only catches style-less tracks (move it to the top to invert).
+ANALYZE_DEEZER_PREVIEWS = False # measure missing BPMs from 30 s previews (slow; installs librosa)
+
+# TEST MODE - paste track links here (right-click a track > Share > Copy link) to test the external APIs
+# without touching Spotify. Non-empty list = run the test only, then stop. Results are cached.
+TEST_EXTERNES = [
+    # "https://open.spotify.com/intl-fr/track/5KjJYrM3UXmvhqtQntrsJM?si=e7311651acdd4323",
+]
+SPOTIFY_TRACK_FALLBACK = True               # in test mode: 1 Spotify call to identify a ReccoBeats-unknown track
+
+# ----------------------------------------------------------------------------------------------------------------------
+# ZONE 3 - FINE AS-IS (how the sorting thinks; change only to tune the logic)
+# ----------------------------------------------------------------------------------------------------------------------
+SPOTIFY_REDIRECT_URI = "http://127.0.0.1:8888/callback"     # must equal the Redirect URI in the app settings
+
+BPM_STEP = 10                   # "80 bpm" bucket = 80.0 to 89.9 (truncated to the lower ten)
+SHOW_HALF_DOUBLE_TEMPO = True   # a 154 bpm track can "feel" like 77: show the alternative bucket
+
+# GENRE RULES - exact playlist names + lowercase keywords matched against the tags. One tag = one vote for the
+# category with the LONGEST matching keyword; the most-voted category wins; this order breaks ties.
 GENRE_RULES = [
-    ("Latina",     ["latin", "reggaeton", "cumbia", "salsa", "bachata", "urbano", "corrido", "mariachi"]),
-    ("Classique",  ["classical", "baroque", "romantic era", "opera", "orchestr", "chamber", "requiem"]),
+    ("Latina",     ["latin", "reggaeton", "cumbia", "salsa", "bachata", "urbano", "corrido", "mariachi", "baile funk", "funk carioca", "flamenco", "tango", "merengue", "dembow"]),
+    ("Classique",  ["classical", "baroque", "romantic era", "opera", "orchestr", "chamber music", "requiem", "symphony"]),
     ("Jazz",       ["jazz", "bebop", "swing", "bossa nova", "big band"]),
-    ("Reggae",     ["reggae", "dancehall", "ska", "dub", "roots"]),
-    ("Rap",        ["rap", "hip hop", "hip-hop", "hiphop", "trap", "drill", "grime", "boom bap"]),
+    ("Reggae",     ["reggae", "dancehall", "ska", "dub", "roots", "rocksteady", "rock steady"]),
+    ("Rap",        ["rap", "hip hop", "hip-hop", "hiphop", "trap", "drill", "grime", "boom bap", "phonk"]),
     ("Soul",       ["soul", "r&b", "rnb", "r&b/soul", "funk", "motown", "gospel"]),
-    ("Electro",    ["electro", "edm", "house", "techno", "tekno", "hardtek", "tribe", "trance", "dubstep", "drum and bass", "dnb", "bass music", "synthwave", "big room"]),
+    ("Electro",    ["electro", "edm", "house", "techno", "tekno", "hardtek", "tribe", "trance", "dubstep", "drum and bass", "dnb", "jungle", "bass music", "synthwave", "big room", "uk garage", "future garage", "speed garage", "hardcore techno", "happy hardcore", "gabber", "frenchcore", "electro swing", "drill and bass", "lofi", "lo-fi", "ambient", "chillout", "downtempo", "trip hop", "trip-hop", "idm", "psytrance", "hardstyle"]),
     ("Dance",      ["dance pop", "dance", "disco", "eurodance", "hyperpop"]),
-    ("Rock",       ["rock", "metal", "punk", "grunge", "emo", "hardcore", "shoegaze", "garage"]),
-    ("Française",  ["french", "chanson", "variete francaise", "variété française", "francoton"]),
-    ("Pop",        ["pop", "indie", "singer-songwriter"]),  # catch-all, keep last
+    ("Rock",       ["rock", "metal", "punk", "grunge", "emo", "screamo", "hardcore", "shoegaze", "garage", "blues", "new wave", "rock opera"]),
+    ("SoundTrack", ["soundtrack", "film score", "game music", "video game music", "anime", "ost",
+                    "bande originale", "film music", "theme song", "composer"]),
+    ("FranÃ§aise",  ["french", "chanson", "variete francaise", "variÃ©tÃ© franÃ§aise", "francoton"]),
+    ("Pop",        ["pop", "indie", "singer-songwriter", "synthpop", "britpop", "folk", "country", "americana", "baroque pop", "chamber pop"]),  # catch-all, keep last
 ]
 
-# --- 5bis) GENRE FALLBACK VIA SPOTIFY - one call per artist since the 02/2026 migration = quota killer on big libraries.
-#           Off by default; unknown-to-Last.fm tracks then show "unidentified genre".
-USE_SPOTIFY_ARTIST_GENRES = False
-MAX_ARTIST_LOOKUPS = 200    # cap on unitary calls if the fallback is enabled (protects the quota)
+# A tag written here goes straight to its category, before any keyword logic (perfect for the report's "unmapped tags" list, or to overrule a keyword decision).
+EXPLICIT_GENRE_MAP = {
+    # "ska punk": "Reggae",
+}
+
+# Only needed when a genre playlist's NAME differs from its category (Share > Copy link, keep the 22 chars).
+GENRE_PLAYLIST_ID_OVERRIDES = {
+    # "MyCategory": "0D8j9PayIN5ZSvDiwHkZiC",
+}
+
+# Sibling playlists that never flag each other as "misplaced" (their border is your taste, not an error).
+NEIGHBOR_GENRES = [
+    {"Dance", "Electro"},
+    {"Pop", "Dance"},
+    {"Pop", "Electro"},
+    {"Soul", "Dance"},
+]
+# Playlists never audited for misplaced genres ("Pop" is your all-era hits catch-all: auditing it is noise).
+MISPLACED_GENRE_EXEMPT = ["Pop"]
+# Only flag a track as misplaced when the verdict comes from the TRACK's own tags (artist tags are too weak).
 MISPLACED_GENRE_TRACK_ONLY = True
 
-# --- 6) OUTPUT AND CACHE
+# Spotify artist genres as last genre fallback: one call PER ARTIST = quota killer, off by default.
+USE_SPOTIFY_ARTIST_GENRES = False
+MAX_ARTIST_LOOKUPS = 200
+
+USE_DEEZER_BPM_FALLBACK = True      # BPM by artist+title when ReccoBeats does not know the exact id
+USE_ITUNES_GENRE_FALLBACK = True    # coarse genre by artist+title when Last.fm knows nothing
+
 OUTPUT_DIR = "rapport_spotify"          # folder for the report CSVs
-CACHE_FILE = "cache_spotify_tri.json"   # disk cache: playlists (by snapshot), ReccoBeats BPMs, Last.fm tags
-                                        # -> delete it to force a full re-read
+CACHE_FILE = "cache_spotify_tri.json"   # the project's memory: do NOT delete it
 
-# --- 6bis) CORPORATE PROXY - "http://[user:pass@]proxy:port", empty = direct connection (home).
-PROXY_URL = "" # /!\
-
-# --- 6ter) SSL - True: use the Windows cert store (fixes CERTIFICATE_VERIFY_FAILED behind SSL-inspecting proxies; requires: pip install truststore).
-USE_SYSTEM_CERTS = True
-
-# --- 7) ADVANCED (only touch if needed)
 DEEZER_URL = "https://api.deezer.com"
 ITUNES_URL = "https://itunes.apple.com/search"
 LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
 RECCOBEATS_URL = "https://api.reccobeats.com/v1/audio-features"
-
-ANALYZE_DEEZER_PREVIEWS = False
 LASTFM_MIN_TAG_COUNT = 10   # ignore overly marginal Last.fm tags
-SCOPES = "playlist-read-private playlist-read-collaborative"    # read-only!
-
-USE_DEEZER_BPM_FALLBACK = True
-USE_DEEZER_BPM_FALLBACK = True
-USE_ITUNES_GENRE_FALLBACK = True
-
-# --- 8) EXTERNAL-API TEST (ReccoBeats + Last.fm, zero Spotify) - paste track links (Spotify app: right-click
-#        -> Share -> Copy link), or "link | Artist | Title" to force names. Non-empty list = test only, then stop.
-#       Results are cached and reused by the real run.
-TEST_EXTERNES = [
-    # "https://open.spotify.com/intl-fr/track/5KjJYrM3UXmvhqtQntrsJM?si=e7311651acdd4323",
-    # "https://open.spotify.com/intl-fr/track/0BeWasraWroRVAFUJ6bXE9?si=53dad651067e4316",
-    # "https://open.spotify.com/intl-fr/track/5xxSDrzTHvmumxskl3nHkh?si=2b45dee672c44284",
-    # "https://open.spotify.com/intl-fr/track/1om616X5tor0L7UR78zapJ?si=27ed7df614ca4ca4",
-    # "https://open.spotify.com/intl-fr/track/1LamF1mUMBPRqQLcZx83ox?si=5c28f3bfc9934712"
-]
-# Unknown to ReccoBeats -> fetch title/artist via Spotify (1 call per unknown track); False = 100% Spotify-free.
-SPOTIFY_TRACK_FALLBACK = True
+SCOPES = "playlist-read-private playlist-read-collaborative" + (" user-library-read" if INCLUDE_LIKED_SONGS else "")   # read-only in every case
 
 # ======================================================================================================================
 # END OF CONFIG - nothing to modify below
 # ======================================================================================================================
 
 GENRE_PLAYLIST_NAMES = [name for name, _ in GENRE_RULES]
+_SPOTIFY_ID_RE = re.compile(r"[A-Za-z0-9]{22}")   # a Spotify track/playlist id is 22 base62 characters
 
 # Env vars as fallback when the fields above are empty (avoids committing secrets).
 SPOTIFY_CLIENT_ID     = SPOTIFY_CLIENT_ID or os.environ.get("SPOTIPY_CLIENT_ID", "")
@@ -142,11 +179,12 @@ if PROXY_URL:
 
 # Certificates: corporate proxies with SSL inspection.
 if USE_SYSTEM_CERTS:
-    try:
-        import truststore
-        truststore.inject_into_ssl()  # Python now validates against the OS certificate store
-    except ImportError:
-        print("INFO: 'truststore' missing (pip install truststore) - needed behind an SSL-inspecting proxy, harmless otherwise.", file=sys.stderr)
+    _ts = _ensure_package("truststore")
+    if _ts:
+        _ts.inject_into_ssl()  # Python now validates against the OS certificate store
+    else:
+        print("INFO: running without 'truststore' - needed behind an SSL-inspecting proxy, harmless otherwise.",
+              file=sys.stderr)
 
 # Shared HTTP session (ReccoBeats, Last.fm): connection pooling skips a TLS handshake per call.
 _http = requests.Session()
@@ -154,7 +192,7 @@ _http = requests.Session()
 # ======================================================================================================================
 # DISK CACHE - protects the Spotify quota and speeds up re-runs
 # ======================================================================================================================
-_cache = {"playlists": {}, "tempos": {}, "lastfm": {}}
+_cache = {"playlists": {}, "tempos": {}, "lastfm": {}, "localmatch": {}}
 _cache_dirty = 0
 
 def load_cache():
@@ -163,6 +201,16 @@ def load_cache():
             data = json.load(f)
         for k in _cache:
             _cache[k].update(data.get(k, {}))
+        healed = 0
+        for entry in _cache["playlists"].values():  # heal caches polluted by a pre-v40 in-place mutation bug
+            for t in entry.get("tracks", []):
+                if "local_id" in t:
+                    t["id"] = t.pop("local_id")
+                    t.pop("matched", None)
+                    healed += 1
+        if healed:
+            print(f"! cache healed: {healed} local track(s) restored to their stable key (pre-v40 bug)")
+            save_cache(force=True)
         print(f"Cache loaded: {len(_cache['playlists'])} playlists, {len(_cache['tempos'])} BPMs, "
               f"{len(_cache['lastfm'])} Last.fm lookups ({CACHE_FILE})")
     except FileNotFoundError:
@@ -184,20 +232,28 @@ def save_cache(force=False):
     except OSError as e:
         print(f"! cache not saved: {e}", file=sys.stderr)
 
-def quota_exit(context):
+def quota_exit(context, retry_after=None):
+    """Saves the cache then stops the script, telling WHEN Spotify will accept requests again (taken from the Retry-After header of the 429 answer when Spotify provides it)."""
     save_cache(force=True)
-    sys.exit(f"\nERROR: Spotify quota exhausted ({context}). Retry in ~24 h, or switch to a new app "
-             f"(+ delete .spotify_token_cache). Cache saved: next run only fetches what is missing.")
+    if retry_after:
+        secs = int(retry_after)
+        h, mn = divmod(secs // 60, 60)
+        resume = time.localtime(time.time() + secs)
+        day = " tomorrow" if resume.tm_mday != time.localtime().tm_mday else ""
+        when = f"Spotify says: retry in {h} h {mn:02d} min (around {time.strftime('%H:%M', resume)}{day})."
+    else:
+        when = "Spotify did not say when; usually ~24 h after the first refusal."
+    sys.exit(f"\nERROR: Spotify quota exhausted ({context}). {when}\n"
+             f"Cache saved: the next run only fetches what is missing.")
 
 def spotify_call(fn, context, attempts=4):
-    """Runs a Spotify call with bounded retries on transient network errors (proxy hiccups: BadStatusLine,
-    connection resets...). A 429 exits cleanly; other Spotify errors are raised to the caller."""
+    """Runs one Spotify call, retrying a few times on network hiccups (proxy glitches). Quota exhausted (429) = save the cache and stop cleanly."""
     for attempt in range(1, attempts + 1):
         try:
             return fn()
         except spotipy.exceptions.SpotifyException as e:
             if e.http_status == 429:
-                quota_exit(context)
+                quota_exit(context, (getattr(e, "headers", None) or {}).get("Retry-After"))
             raise
         except requests.exceptions.RequestException as e:
             if attempt == attempts:
@@ -209,17 +265,48 @@ def spotify_call(fn, context, attempts=4):
 # ======================================================================================================================
 # SPOTIFY HELPERS
 # ======================================================================================================================
+def validate_config(require_spotify=True):
+    """Checks every credential/ID in the CONFIG block and returns ALL the problems at once, each with a plain-language fix. Secret values are never displayed."""
+    problems = []
+    if require_spotify:
+        if not re.fullmatch(r"[0-9a-f]{32}", SPOTIFY_CLIENT_ID or ""):
+            problems.append(
+                f"SPOTIFY_CLIENT_ID looks wrong: the script found {SPOTIFY_CLIENT_ID!r},\n"
+                f"    but a real Client ID is 32 letters/digits, like 6a905271bd724376a51cae10e31dd4da.\n"
+                f"    FIX: open https://developer.spotify.com/dashboard > your app > Settings,\n"
+                f"         copy the Client ID and paste it in the CONFIG block at the top of this file.")
+        if not re.fullmatch(r"[0-9a-f]{32}", SPOTIFY_CLIENT_SECRET or ""):
+            problems.append(
+                f"SPOTIFY_CLIENT_SECRET looks wrong: the script found {len(SPOTIFY_CLIENT_SECRET or '')} character(s)\n"
+                f"    (value hidden for safety), but a real secret is 32 letters/digits.\n"
+                f"    FIX: open https://developer.spotify.com/dashboard > your app > Settings,\n"
+                f"         click 'View client secret', copy it and paste it in the CONFIG block.")
+        if not _SPOTIFY_ID_RE.fullmatch(SOURCE_PLAYLIST_ID or ""):
+            problems.append(
+                f"SOURCE_PLAYLIST_ID looks wrong: the script found {SOURCE_PLAYLIST_ID!r}.\n"
+                f"    FIX: in Spotify, right-click your source playlist > Share > Copy link, then keep only\n"
+                f"         the 22 characters between /playlist/ and ?si= and paste them in the CONFIG block.")
+    if LASTFM_API_KEY and not re.fullmatch(r"[0-9a-f]{32}", LASTFM_API_KEY):
+        problems.append(
+            f"LASTFM_API_KEY looks wrong: the script found {len(LASTFM_API_KEY)} character(s)\n"
+            f"    (value hidden for safety), but a real key is 32 letters/digits.\n"
+            f"    FIX: copy your key from https://www.last.fm/api/accounts and paste it in the CONFIG block,\n"
+            f"         or leave it empty (\"\") to run without Last.fm.")
+    return problems
+
 def get_client() -> spotipy.Spotify:
-    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-        sys.exit("ERROR: SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET not set - fill the CONFIG block "
-                 "(credentials: developer.spotify.com/dashboard, Redirect URI = SPOTIFY_REDIRECT_URI).")
+    problems = validate_config(require_spotify=True)
+    if problems:
+        sys.exit("The script cannot start: something in the CONFIG block needs fixing.\n\n  * "
+                 + "\n\n  * ".join(problems)
+                 + "\n\nFix the line(s) above in the CONFIG block at the top of the file, save, and run again.")
     # status_retries=0: on a 429 (quota), spotipy raises immediately instead of sleeping for hours
     auth = SpotifyOAuth(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, redirect_uri=SPOTIFY_REDIRECT_URI,
                         scope=SCOPES, open_browser=True, cache_path=".spotify_token_cache")
     return spotipy.Spotify(auth_manager=auth, retries=3, status_retries=0, requests_timeout=15)
 
 def fetch_all(sp, first_page, context="pagination"):
-    """Iterates over every page of a paginated Spotify result (network-retried)."""
+    """Follows the "next page" links of a paginated Spotify answer and returns all items."""
     items, page = list(first_page["items"]), first_page
     while page["next"]:
         page = spotify_call(lambda p=page: sp.next(p), context)
@@ -227,8 +314,7 @@ def fetch_all(sp, first_page, context="pagination"):
     return items
 
 def _parse_playlist_items(items, skipped=None):
-    """Extracts tracks from a list of items, old format ('track' key) and new format ('item' key) alike.
-    'skipped' (optional dict) is incremented with the reason for every dropped item."""
+    """Turns raw playlist items into simple track dicts. Local files are kept (with a stable synthetic id) when INCLUDE_LOCAL_FILES is on; skipped items are counted with their reason."""
     tracks = []
     for it in items:
         t = it.get("track") or it.get("item") or {}
@@ -254,14 +340,12 @@ def _parse_playlist_items(items, skipped=None):
     return tracks
 
 def get_playlist_tracks(sp, playlist_id, snapshot_id=None):
-    """
-    [{id, name, artists, artist_ids}] for a playlist; locals/episodes skipped. Unchanged snapshot_id -> served
-    from cache (0 call). 02/2026 migration: new /items endpoint first, old /tracks as fallback; 429 exits cleanly.
-    """
+    """Returns the tracks of one playlist. Served from the disk cache when the playlist has not changed (snapshot_id).
+    Reads the new /items endpoint first, the old /tracks one as fallback; a partially-read playlist is never cached."""
     global _cache_dirty
     cached = _cache["playlists"].get(playlist_id)
     if cached and snapshot_id and cached.get("snapshot_id") == snapshot_id:
-        return cached["tracks"]
+        return [dict(t) for t in cached["tracks"]]  # copies: runtime mutations must never leak into the cache
 
     # 1) new /items endpoint (post-migration) - pages parsed on the fly; network retries are BOUNDED (spotify_call)
     #    and a partially-read playlist is never cached (complete flag).
@@ -303,9 +387,29 @@ def get_playlist_tracks(sp, playlist_id, snapshot_id=None):
             tracks = []
 
     if snapshot_id and complete:
-        _cache["playlists"][playlist_id] = {"snapshot_id": snapshot_id, "tracks": tracks}
+        _cache["playlists"][playlist_id] = {"snapshot_id": snapshot_id, "tracks": [dict(t) for t in tracks]}
         _cache_dirty += 1
         save_cache(force=True)  # every fully-read playlist is immediately secured on disk
+    return tracks
+
+def get_liked_tracks(sp):
+    """Reads the user's "Liked Songs" library (50 per call). Cached, invalidated when the liked count
+    changes. Coded defensively: if the endpoint is unavailable, the run continues without liked songs."""
+    global _cache_dirty
+    try:
+        first = spotify_call(lambda: sp.current_user_saved_tracks(limit=50), "liked songs")
+    except spotipy.exceptions.SpotifyException as e:
+        print(f"  ! Liked Songs unavailable ({e.http_status}) -> continuing without them", file=sys.stderr)
+        return []
+    total = first.get("total", 0)
+    cached = _cache["playlists"].get("__liked__")
+    if cached and cached.get("snapshot_id") == str(total):
+        return [dict(t) for t in cached["tracks"]]
+    items = fetch_all(sp, first, "liked songs")
+    tracks = _parse_playlist_items(items)
+    _cache["playlists"]["__liked__"] = {"snapshot_id": str(total), "tracks": [dict(t) for t in tracks]}
+    _cache_dirty += 1
+    save_cache(force=True)
     return tracks
 
 def get_my_playlists(sp):
@@ -318,8 +422,8 @@ def get_my_playlists(sp):
 _reccobeats_failures = 0  # consecutive failures -> circuit breaker
 
 def _reccobeats_get(endpoint, ids):
-    """Backoff on 429 (Retry-After, capped 60 s) and 5xx, 4 attempts; 3 failed batches in a row = circuit breaker forthe run.
-    Returns the 'content' list, or None."""
+    """One ReccoBeats request with retries; honours "slow down" (429) answers.
+    After 3 failed batches in a row the script stops calling ReccoBeats for this run (the cache keeps what was fetched)."""
     global _reccobeats_failures
     if _reccobeats_failures >= 3:
         return None
@@ -349,8 +453,8 @@ def _reccobeats_get(endpoint, ids):
 _RB_ID_RE = re.compile(r"track/([A-Za-z0-9]+)")  # compiled once: href = .../track/{spotify_id}
 
 def get_tempos(sp, tracks_by_id):
-    """dict {track_id: float bpm or None}. Stages: cache -> Spotify -> ReccoBeats (by ID) -> Deezer (by name)
-    -> optional local preview analysis. One clean summary line per stage."""
+    """Finds the BPM of every track: cache, then Spotify, then ReccoBeats (by id), then Deezer (by artist+title),
+    then optional local measurement of Deezer previews. One summary line per stage."""
     global _cache_dirty
 
     def stage(name, found, left, note=""):
@@ -363,7 +467,7 @@ def get_tempos(sp, tracks_by_id):
         return tempos
 
     # --- Spotify audio-features (pre-2024 apps only); synthetic local IDs excluded
-    spotify_ids = [tid for tid in missing if re.fullmatch(r"[A-Za-z0-9]{22}", tid)]
+    spotify_ids = [tid for tid in missing if _SPOTIFY_ID_RE.fullmatch(tid)]
     spotify_ok, found = bool(spotify_ids), 0
     try:
         feats = sp.audio_features(spotify_ids[:1]) if spotify_ids else None
@@ -386,7 +490,7 @@ def get_tempos(sp, tracks_by_id):
         stage("Spotify", 0, len(missing), "endpoint unavailable (deprecated for this app)")
 
     # --- ReccoBeats (by Spotify ID, ~40 per batch); local files have no ID
-    rb_ids = [tid for tid in missing if re.fullmatch(r"[A-Za-z0-9]{22}", tid)]
+    rb_ids = [tid for tid in missing if _SPOTIFY_ID_RE.fullmatch(tid)]
     found = 0
     for i in range(0, len(rb_ids), 40):
         content = _reccobeats_get("audio-features", rb_ids[i:i + 40])
@@ -440,7 +544,7 @@ def get_tempos(sp, tracks_by_id):
                 continue
             bpm = measure_preview_bpm(url)
             if bpm == "no-librosa":
-                print("      ! librosa not installed (pip install librosa) -> preview analysis skipped")
+                print("      ! librosa unavailable (automatic install failed) -> preview analysis skipped")
                 break
             if bpm:
                 tempos[tid] = bpm
@@ -459,15 +563,15 @@ def get_tempos(sp, tracks_by_id):
 _deezer_failures = 0
 _preview_urls = {}
 
+_TITLE_SUFFIX_RE = re.compile(r"\s+-\s+")
+
 def _clean_title(title):
-    """Strips version suffixes (' - Radio Edit', ' - 2011 Remastered Version'...) for name-based search."""
-    return re.split(r"\s+-\s+", title)[0].strip()
+    """Drops version suffixes (" - Radio Edit", " - 2011 Remastered Version"...) before a name-based search."""
+    return _TITLE_SUFFIX_RE.split(title)[0].strip()
 
 def get_deezer_bpm(artist, title, tid=None):
-    """
-    BPM via the public Deezer API (no key): search by artist+title, then read bpm on the track detail.
-    Immune to release-specific Spotify IDs. Returns a float, or None. Circuit breaker after 5 straight failures.
-    """
+    """BPM via the public Deezer API: search the track by name, read its bpm. Works for local files and remastered versions.
+    Returns None when Deezer does not know (or has bpm=0)."""
     global _deezer_failures
     if _deezer_failures >= 5:
         return None
@@ -499,11 +603,11 @@ def get_deezer_bpm(artist, title, tid=None):
         time.sleep(0.3)  # Deezer allows ~50 req / 5 s; two calls per track -> stay well under
 
 def measure_preview_bpm(preview_url):
-    """Downloads a 30 s Deezer preview and measures its tempo with librosa. None on any failure.
-    Caveat: beat trackers sometimes lock on half/double tempo - treat results as good estimates."""
-    try:
-        import io, librosa  # heavy optional deps: pip install librosa soundfile audioread
-    except ImportError:
+    """Downloads a 30 s Deezer preview and measures its tempo with librosa (installed automatically on first use).
+    Beat trackers sometimes lock on half/double tempo: treat as an estimate."""
+    import io
+    librosa = _ensure_package("librosa")  # heavy: pulls numpy/scipy/soundfile, one-time ~1-2 min install
+    if librosa is None:
         return "no-librosa"
     try:
         audio = _http.get(preview_url, timeout=20).content
@@ -516,8 +620,8 @@ def measure_preview_bpm(preview_url):
 _itunes_failures = 0
 
 def get_itunes_genre(artist, title):
-    """Last-resort genre via the keyless iTunes Search API: returns a lowercase primaryGenreName, or None.
-    Cached (including misses). Apple tolerates ~20 req/min -> 3 s pause per real call."""
+    """Last-resort genre from the keyless iTunes Search API (coarse names like "Hip-Hop/Rap").
+    Slow on purpose: Apple tolerates about 20 requests per minute. Misses are cached too."""
     global _itunes_failures, _cache_dirty
     key = f"itunes::{artist.lower()}||{title.lower()}"
     if key in _cache["lastfm"]:
@@ -588,8 +692,7 @@ _lastfm_fail_streak = 0  # consecutive failures -> circuit breaker (avoids 2000 
 _lastfm_disabled = False
 
 def _lastfm_get(params, verbose=False):
-    """Raw Last.fm call: retries on rate-limit (HTTP 429 / error 29); 10 straight network failures = circuit breaker for the run.
-    Returns JSON, or None on failure (never cached)."""
+    """One Last.fm request with retries; honours rate limits. After 10 straight network failures Last.fm is cut off for this run (already-fetched tags stay cached)."""
     global _lastfm_fail_streak, _lastfm_disabled
     if _lastfm_disabled or not LASTFM_API_KEY:
         return None
@@ -627,7 +730,7 @@ def _extract_tags(data, root):
     return [t["name"].lower() for t in raw if int(t.get("count", 0)) >= LASTFM_MIN_TAG_COUNT][:10]
 
 def get_lastfm_track_tags(artist, title, verbose=False):
-    """Last.fm tags of a specific TRACK. [] if unavailable. Disk cache (network failures are never cached)."""
+    """Last.fm tags of one specific TRACK. Empty list when unknown. Cached on disk; network failures are never cached, so they are retried next run."""
     global _cache_dirty
     key = f"{artist.lower()}||{title.lower()}"
     if key in _cache["lastfm"]:
@@ -645,7 +748,7 @@ def get_lastfm_track_tags(artist, title, verbose=False):
     return tags
 
 def get_lastfm_artist_tags(artist, verbose=False):
-    """Last.fm tags of an ARTIST (2nd cascade stage: obscure tracks often have no tags of their own)."""
+    """Last.fm tags of an ARTIST - the safety net when the track itself has no tags."""
     global _cache_dirty
     key = f"artist::{artist.lower()}"
     if key in _cache["lastfm"]:
@@ -662,22 +765,43 @@ def get_lastfm_artist_tags(artist, verbose=False):
     save_cache()
     return tags
 
-# One compiled regex per category: much faster than nested keyword loops, same order semantics.
-_GENRE_PATTERNS = [(cat, re.compile("|".join(re.escape(kw) for kw in kws))) for cat, kws in GENRE_RULES]
+# One compiled pattern per keyword. Keywords match on WORD BOUNDARIES ("dub" no longer fires inside "dubstep");
+# the few prefix keywords below intentionally match their derivatives (electro -> electronic(a)).
+_PREFIX_KWS = {"orchestr", "electro"}
+_CAT_RANK = {cat: rank for rank, (cat, _) in enumerate(GENRE_RULES)}
+_KW_PATTERNS = [(rank, cat, kw, re.compile(r"\b" + re.escape(kw) + ("" if kw in _PREFIX_KWS else r"\b")))
+                for rank, (cat, kws) in enumerate(GENRE_RULES) for kw in kws]
+
+def _tag_vote(tag):
+    """Gives ONE vote for one tag: an EXPLICIT_GENRE_MAP pin wins outright; otherwise the category with the LONGEST matching keyword ("electro swing" goes to Electro, not Jazz)."""
+    pinned = EXPLICIT_GENRE_MAP.get(tag.strip().lower())
+    if pinned:
+        return pinned
+    best_key, best_cat = None, None
+    for rank, cat, kw, pat in _KW_PATTERNS:
+        if pat.search(tag):
+            key = (len(kw), -rank)
+            if best_key is None or key > best_key:
+                best_key, best_cat = key, cat
+    return best_cat
 
 def match_category(genre_list):
-    """Folds a list of raw genres/tags into your coarse-grained categories. First matching category wins."""
-    joined = " \u00a7 ".join(genre_list)
-    for category, pattern in _GENRE_PATTERNS:
-        if pattern.search(joined):
-            return category
-    return None
+    """Turns a list of raw tags into one of your categories by majority vote (one vote per tag, see _tag_vote).
+    Ties are settled by the GENRE_RULES order. None when nothing matches."""
+    votes = {}
+    for g in genre_list:
+        cat = _tag_vote(g)
+        if cat:
+            votes[cat] = votes.get(cat, 0) + 1
+    if not votes:
+        return None
+    return min(votes.items(), key=lambda kv: (-kv[1], _CAT_RANK[kv[0]]))[0]
 
 _genre_cache = {}
 
 def resolve_genre(track, artist_genres):
-    """(category|None, raw_genres, source). Cascade: Last.fm track tags -> Last.fm main-artist tags ->
-    Spotify artist genres (Spotify has no per-track genre, hence last)."""
+    """Finds a track's genre, most precise source first: Last.fm tags of the track, then of the main artist, then iTunes, then Spotify artist genres.
+    Returns (category, raw tags, source)."""
     if track["id"] in _genre_cache:
         return _genre_cache[track["id"]]
 
@@ -715,7 +839,8 @@ def resolve_genre(track, artist_genres):
 # EXTERNAL-API TEST MODE (no Spotify OAuth, quota-free except the optional per-unknown-track fallback)
 # ======================================================================================================================
 def run_external_test():
-    """Tests ReccoBeats (BPM + track info) and Last.fm (tags/genre) for real, without touching the Spotify API."""
+    """TEST_EXTERNES mode: checks ReccoBeats and Last.fm on a few pasted links, without touching the Spotify quota
+    (except the optional 1-call-per-unknown-track lookup)."""
     print(f"EXTERNAL TEST: {len(TEST_EXTERNES)} track(s) - ReccoBeats + Last.fm, zero Spotify calls\n")
     entries = []
     for line in TEST_EXTERNES:
@@ -756,7 +881,10 @@ def run_external_test():
 
     # --- 0bis) Spotify fallback for tracks unknown to ReccoBeats (1 API call per track, no more)
     still = [e for e in entries if not e["title"]]
-    if still and SPOTIFY_TRACK_FALLBACK:
+    if still and SPOTIFY_TRACK_FALLBACK and validate_config(require_spotify=True):
+        print(f"0bis) Spotify fallback skipped (invalid Spotify credentials in CONFIG): "
+              f"{len(still)} track(s) will remain unidentified\n")
+    elif still and SPOTIFY_TRACK_FALLBACK:
         print(f"0bis) Spotify (track-info fallback: only {len(still)} API call(s)):")
         try:
             sp_fallback = get_client()
@@ -827,11 +955,84 @@ def run_external_test():
     print("Test finished - no Spotify API call was made." if not (still and SPOTIFY_TRACK_FALLBACK)
           else "Test finished - only the track-info fallback touched the Spotify API.")
 
+def _norm(s):
+    """Loose text normalisation (case, punctuation, version suffixes) used to compare titles/artists."""
+    return re.sub(r"[^a-z0-9]+", " ", _clean_title(s).lower()).strip()
+
+def match_local_tracks(sp, tracks):
+    """Finds the Spotify catalog equivalent of each local file so it becomes sortable.
+    Up to 3 searches per file, each only if the previous failed: normal fields, swapped fields (rescues inverted MP3 tags), free text.
+    Hits AND misses are cached; the per-run cap counts search calls."""
+    global _cache_dirty
+    locals_ = [t for t in tracks if t.get("local")]
+    if not locals_ or not MATCH_LOCAL_FILES:
+        return
+
+    def eligible(hit):  # never searched, or an old miss that predates the extended modes
+        return hit is None or (not hit.get("id") and hit.get("v", 1) < 2)
+
+    def acceptable(cand, name, artist):
+        """A candidate is valid if its title/artist correspond to ours in EITHER orientation."""
+        cn, ca = _norm(cand.get("name", "")), _norm(", ".join(a["name"] for a in cand.get("artists", [])))
+        tn, ta = _norm(name), _norm(artist)
+        pair_ok = lambda a, b: a and b and (a in b or b in a)
+        return (pair_ok(tn, cn) and (pair_ok(ta, ca) or not ta)) or (pair_ok(tn, ca) and pair_ok(ta, cn))
+
+    to_do = sum(1 for t in locals_ if eligible(_cache["localmatch"].get(t.get("local_id") or t["id"])))
+    if to_do:
+        cap = f", capped at {MAX_LOCAL_MATCH_PER_RUN} search calls this run" if MAX_LOCAL_MATCH_PER_RUN else ""
+        print(f"  * local match: {to_do} local file(s) to search (1-3 calls each{cap})")
+    calls = matched = 0
+    for t in locals_:
+        key = t.get("local_id") or t["id"]  # synthetic local::artist::title, stable across runs
+        hit = _cache["localmatch"].get(key)
+        if eligible(hit):
+            if MAX_LOCAL_MATCH_PER_RUN and calls >= MAX_LOCAL_MATCH_PER_RUN:
+                continue
+            main = t["artists"].split(",")[0].strip()
+            title = _clean_title(t["name"])
+            attempts = [f'track:"{title}" artist:"{main}"',
+                        f'track:"{main}" artist:"{title}"',      # swapped tags rescue
+                        f"{title} {main}"]                        # free-text rescue
+            hit = {"id": "", "name": "", "artists": "", "v": 2}
+            aborted = False
+            for q in attempts:
+                if MAX_LOCAL_MATCH_PER_RUN and calls >= MAX_LOCAL_MATCH_PER_RUN:
+                    aborted = True  # cap hit mid-track: not cached, cleanly redone next run
+                    break
+                calls += 1
+                time.sleep(LOCAL_MATCH_PACE)  # paced: Spotify rate-limits bursts on a rolling window
+                if calls % 100 == 0:
+                    print(f"      ... {calls} search calls, {matched} matched")
+                try:
+                    res = spotify_call(lambda q=q: sp.search(q=q, type="track", limit=3), "local file matching")
+                except spotipy.exceptions.SpotifyException:
+                    aborted = True
+                    break
+                for cand in (res.get("tracks", {}) or {}).get("items", []):
+                    if acceptable(cand, t["name"], main):
+                        hit = {"id": cand["id"], "name": cand["name"],
+                               "artists": ", ".join(a["name"] for a in cand.get("artists", [])), "v": 2}
+                        break
+                if hit["id"]:
+                    break
+            if not aborted:
+                _cache["localmatch"][key] = hit
+                _cache_dirty += 1
+                save_cache()
+        if hit and hit.get("id"):
+            t["local_id"], t["id"], t["matched"] = key, hit["id"], True
+            t["artist_ids"] = []  # unknown, and unused (genre goes through the name-based cascade anyway)
+            matched += 1
+    save_cache(force=True)
+    print(f"  * local match: {matched}/{len(locals_)} matched on the Spotify catalog ({calls} search calls this run)")
+
 # ======================================================================================================================
 # REAL DATA GATHERING
 # ======================================================================================================================
 def gather_real_data(sp):
-    """Real collection through the APIs (Spotify/ReccoBeats/Last.fm). Returns everything the analysis needs."""
+    """Reads everything the analysis needs: your playlists, the source tracks, the local-file matches, the BPMs and the artist genres.
+    Returns it all to main()."""
     # ---------------- The user's playlists ----------------
     print("Reading your playlists...")
     all_playlists = get_my_playlists(sp)
@@ -844,6 +1045,9 @@ def gather_real_data(sp):
             bpm_playlists[int(m.group(1))] = {"id": p["id"], "name": name}
         elif name in GENRE_PLAYLIST_NAMES:
             genre_playlists[name] = {"id": p["id"], "name": name}
+
+    for cat, pid in GENRE_PLAYLIST_ID_OVERRIDES.items():
+        genre_playlists[cat] = {"id": pid, "name": cat}  # bound by ID: name and folder are irrelevant
 
     print(f"  BPM playlists found   : {sorted(bpm_playlists)}")
     print(f"  Genre playlists found : {sorted(genre_playlists)}\n")
@@ -862,7 +1066,13 @@ def gather_real_data(sp):
         print(f"  {info['name']:<12} : {len(contents[info['name']])} tracks")
 
     source_tracks = get_playlist_tracks(sp, SOURCE_PLAYLIST_ID, snapshots.get(SOURCE_PLAYLIST_ID))
-    print(f"\nSource playlist: {len(source_tracks)} tracks\n")
+    print(f"\nSource playlist: {len(source_tracks)} tracks")
+    if INCLUDE_LIKED_SONGS:
+        seen = {t["id"] for t in source_tracks}
+        liked = [dict(t, liked=True) for t in get_liked_tracks(sp) if t["id"] not in seen]
+        source_tracks.extend(liked)
+        print(f"Liked songs added: {len(liked)} (not already in the source)")
+    print()
     if not source_tracks:
         print("!! DIAGNOSTIC: the source playlist returns no usable track.")
         try:
@@ -893,6 +1103,12 @@ def gather_real_data(sp):
             print(f"!!   New /items endpoint: error {e}")
         print("!!   -> Send this diagnostic block as-is for analysis.\n")
 
+    # ---------------- Local files: find their Spotify catalog equivalents ----------------
+    every = list(source_tracks)
+    for lst in contents.values():
+        every.extend(lst)
+    match_local_tracks(sp, every)
+
     # ---------------- BPM + genres for ALL tracks ----------------
     all_tracks = {t["id"]: t for t in source_tracks}
     for lst in contents.values():
@@ -912,6 +1128,11 @@ def gather_real_data(sp):
 # ======================================================================================================================
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    problems = validate_config(require_spotify=not TEST_EXTERNES)
+    if problems:
+        sys.exit("The script cannot start: something in the CONFIG block needs fixing.\n\n  * "
+                 + "\n\n  * ".join(problems)
+                 + "\n\nFix the line(s) above in the CONFIG block at the top of the file, save, and run again.")
     if TEST_EXTERNES:  # test mode: ReccoBeats + Last.fm only, zero Spotify calls
         load_cache()
         run_external_test()
@@ -975,7 +1196,7 @@ def main():
             g_tok = f"NEW {genre}"
             to_create_genre[genre].append(f"{t['name']} - {t['artists']}")
 
-        loc = " [LOCAL]" if t.get("local") else ""
+        loc = (" [LOCAL~Spotify]" if t.get("matched") else " [LOCAL]") if t.get("local") else (" [LIKED]" if t.get("liked") else "")
         tag = raw_genres[0] if raw_genres else ""
         # console line: only what is known - except "(? bpm)" on an otherwise-complete line, so a missing tempo does not go unnoticed.
         # A fully unresolved track stays bare (details always live in the CSV).
@@ -1013,9 +1234,13 @@ def main():
 
     skipped_artist_flags = 0
     for gname, info in sorted(genre_playlists.items()):
+        if gname in MISPLACED_GENRE_EXEMPT:
+            continue  # deliberate catch-all playlists are not audited
         for t in contents[info["name"]]:
             genre, raw, src = resolve_genre(t, artist_genres)
             if genre and genre != gname:
+                if any({gname, genre} <= pair for pair in NEIGHBOR_GENRES):
+                    continue  # sibling playlists: the border is a curation choice, not a misplacement
                 if MISPLACED_GENRE_TRACK_ONLY and "track" not in src:
                     skipped_artist_flags += 1  # artist-level tag = too weak a signal to flag
                     continue
