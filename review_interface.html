@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sort Review — Spotify Playlist Sorter</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root{
+  --void:#14120F; --panel:#1C1914; --panel-raised:#231F19; --hairline:#39342C;
+  --text:#EDE7DA; --text-dim:#9C9384; --text-faint:#5E584C;
+  --ready:#7FA66B; --ready-dim:#3A4630;
+  --review:#D9A441; --review-dim:#4A3D22;
+  --skip:#8A8578; --skip-dim:#332F27;
+  --reject:#B5533C; --reject-dim:#452922;
+  --focus:#D9A441;
+  --mono: 'IBM Plex Mono', ui-monospace, 'Consolas', monospace;
+  --sans: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
+}
+*{box-sizing:border-box;}
+body{
+  margin:0; background:var(--void); color:var(--text); font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{ outline:2px solid var(--focus); outline-offset:2px; }
+
+.wrap{ max-width:920px; margin:0 auto; padding:32px 20px 96px; }
+
+/* ---------- header ---------- */
+header{
+  display:flex; justify-content:space-between; align-items:flex-end; gap:24px;
+  padding-bottom:20px; border-bottom:1px solid var(--hairline); margin-bottom:28px; flex-wrap:wrap;
+}
+.title-block h1{
+  font-size:22px; font-weight:700; letter-spacing:0.02em; margin:0 0 4px;
+  text-transform:uppercase;
+}
+.title-block .sub{ color:var(--text-dim); font-size:13px; font-family:var(--mono); }
+.header-actions{ display:flex; gap:8px; }
+
+button{ font-family:var(--sans); cursor:pointer; }
+.btn{
+  background:var(--panel-raised); color:var(--text); border:1px solid var(--hairline);
+  border-radius:3px; padding:9px 14px; font-size:13px; font-weight:500; transition:border-color .15s;
+}
+.btn:hover{ border-color:var(--text-faint); }
+.btn.primary{ background:var(--review-dim); border-color:var(--review); color:#F3DBA0; }
+.btn.primary:hover{ background:#5A4A28; }
+.btn:disabled{ opacity:.35; cursor:not-allowed; }
+input[type=file]{ display:none; }
+
+/* ---------- tally strip ---------- */
+.tally{
+  display:grid; grid-template-columns:repeat(3,1fr); gap:1px; background:var(--hairline);
+  border:1px solid var(--hairline); border-radius:4px; overflow:hidden; margin-bottom:32px;
+}
+.tally div{ background:var(--panel); padding:16px 18px; }
+.tally .num{ font-family:var(--mono); font-size:28px; font-weight:600; line-height:1; }
+.tally .lbl{ font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.06em; margin-top:6px; }
+.tally .ready .num{ color:var(--ready); }
+.tally .review .num{ color:var(--review); }
+.tally .skip .num{ color:var(--text-faint); }
+
+/* ---------- section headers ---------- */
+h2{
+  font-size:12px; text-transform:uppercase; letter-spacing:.1em; color:var(--text-dim);
+  font-weight:600; margin:0 0 12px; display:flex; align-items:center; gap:10px;
+}
+h2::after{ content:""; flex:1; height:1px; background:var(--hairline); }
+section{ margin-bottom:36px; }
+
+/* ---------- unlock cards (playlist creation) ---------- */
+.unlocks{ display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:10px; }
+.unlock{
+  background:var(--panel); border:1px solid var(--hairline); border-radius:4px; padding:14px;
+  display:flex; flex-direction:column; gap:10px;
+}
+.unlock .name{ font-family:var(--mono); font-size:14px; font-weight:600; }
+.unlock .count{ font-size:12px; color:var(--text-dim); }
+.switch{
+  display:flex; border:1px solid var(--hairline); border-radius:3px; overflow:hidden; font-size:11px;
+}
+.switch button{
+  flex:1; background:var(--panel-raised); color:var(--text-dim); border:none; padding:7px 4px;
+  text-transform:uppercase; letter-spacing:.05em; font-weight:600; transition:.15s;
+}
+.switch button.on.create{ background:var(--ready-dim); color:var(--ready); }
+.switch button.on.skip{ background:var(--skip-dim); color:var(--text-dim); }
+
+/* ---------- ready summary ---------- */
+.ready-row{
+  background:var(--panel); border:1px solid var(--ready-dim); border-left:3px solid var(--ready);
+  border-radius:4px; padding:14px 16px; display:flex; justify-content:space-between; align-items:center;
+}
+.ready-row .txt{ font-size:13px; color:var(--text-dim); }
+.ready-row .txt b{ color:var(--ready); font-family:var(--mono); font-weight:600; }
+
+/* ---------- review group cards ---------- */
+.group{
+  background:var(--panel); border:1px solid var(--hairline); border-radius:4px; margin-bottom:10px;
+  overflow:hidden;
+}
+.group-head{ padding:14px 16px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+.group-head .meta{ flex:1; min-width:200px; }
+.group-head .reason{ font-size:14px; font-weight:500; }
+.group-head .why{ font-size:12px; color:var(--text-dim); margin-top:2px; }
+.group-head .count{
+  font-family:var(--mono); font-size:12px; color:var(--review); background:var(--review-dim);
+  padding:3px 8px; border-radius:10px; white-space:nowrap;
+}
+.group.state-approved{ border-color:var(--ready-dim); }
+.group.state-approved .group-head{ background:linear-gradient(90deg, var(--ready-dim)22, transparent 40%); }
+.group.state-skipped{ border-color:var(--hairline); }
+.group.state-skipped .group-head{ opacity:.6; }
+
+.vu{ display:flex; gap:2px; align-items:flex-end; height:16px; }
+.vu i{ width:3px; background:var(--hairline); border-radius:1px; }
+.vu i.lit{ background:var(--review); }
+
+.group-actions{ display:flex; gap:6px; }
+.gbtn{
+  border:1px solid var(--hairline); background:var(--panel-raised); color:var(--text-dim);
+  border-radius:3px; padding:7px 12px; font-size:12px; font-weight:500;
+}
+.gbtn.approve.active{ background:var(--ready-dim); border-color:var(--ready); color:var(--ready); }
+.gbtn.skip.active{ background:var(--skip-dim); border-color:var(--text-faint); color:var(--text-dim); }
+.gbtn.expand{ background:none; border:none; color:var(--text-faint); text-decoration:underline; padding:7px 4px; }
+
+.tracklist{ border-top:1px solid var(--hairline); padding:4px 16px 10px; display:none; }
+.tracklist.open{ display:block; }
+.tl-toolbar{ display:flex; align-items:center; gap:8px; padding:10px 0 8px; flex-wrap:wrap; }
+.tl-filter{
+  flex:1; min-width:160px; background:var(--panel-raised); border:1px solid var(--hairline); color:var(--text);
+  border-radius:3px; padding:7px 10px; font-size:12px; font-family:var(--sans);
+}
+.tl-filter::placeholder{ color:var(--text-faint); }
+.tl-sort{
+  background:var(--panel-raised); border:1px solid var(--hairline); color:var(--text-dim); border-radius:3px;
+  padding:7px 8px; font-size:12px; font-family:var(--sans);
+}
+.tl-hint{ font-size:11px; color:var(--text-faint); font-family:var(--mono); white-space:nowrap; }
+.tl-rows{ max-height:340px; overflow-y:auto; }
+.trow{
+  display:flex; align-items:center; gap:10px; padding:7px 4px; border-bottom:1px solid #2a261f;
+  font-size:13px;
+}
+.trow:last-child{ border-bottom:none; }
+.trow input{
+  appearance:none; -webkit-appearance:none; flex-shrink:0; width:18px; height:18px; margin:0;
+  border:1.5px solid var(--hairline); border-radius:4px; background:var(--panel-raised);
+  cursor:pointer; position:relative; transition:background .12s, border-color .12s, box-shadow .12s;
+}
+.trow input:hover{ border-color:var(--text-faint); }
+.trow input:checked{
+  background:var(--review); border-color:var(--review); box-shadow:0 0 8px 0 rgba(217,164,65,.45);
+}
+.trow input:checked::after{
+  content:""; position:absolute; left:5px; top:1px; width:5px; height:9px;
+  border:solid var(--void); border-width:0 2px 2px 0; transform:rotate(45deg);
+}
+.trow input:focus-visible{ outline:2px solid var(--focus); outline-offset:2px; }
+.trow .tt{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.trow .tt b{ font-weight:500; }
+.trow .tt span{ color:var(--text-dim); }
+.trow .detail{ font-family:var(--mono); font-size:11px; color:var(--text-faint); white-space:nowrap; }
+.more-note{ padding:8px 4px 0; font-size:11px; color:var(--text-faint); font-style:italic; }
+
+footer{
+  position:sticky; bottom:0; margin-top:8px; padding:16px 20px; background:rgba(20,18,15,.92);
+  backdrop-filter:blur(6px); border-top:1px solid var(--hairline); display:flex;
+  justify-content:space-between; align-items:center; border-radius:4px 4px 0 0;
+}
+.footer-note{ font-size:12px; color:var(--text-dim); font-family:var(--mono); }
+
+.empty{ text-align:center; padding:40px 20px; color:var(--text-dim); font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="title-block">
+      <h1>Sort Review</h1>
+      <div class="sub" id="sourceLabel">Preview with sample data — load your report to review the real thing</div>
+    </div>
+    <div class="header-actions">
+      <label class="btn" for="fileInput">Load report.json</label>
+      <input type="file" id="fileInput" accept="application/json">
+      <button class="btn primary" id="exportBtn">Export decisions</button>
+    </div>
+  </header>
+
+  <div class="tally">
+    <div class="ready"><div class="num" id="tallyReady">0</div><div class="lbl">Ready to apply</div></div>
+    <div class="review"><div class="num" id="tallyReview">0</div><div class="lbl">Included from review</div></div>
+    <div class="skip"><div class="num" id="tallySkip">0</div><div class="lbl">Left out for now</div></div>
+  </div>
+
+  <section>
+    <h2>Already sorted</h2>
+    <div class="ready-row">
+      <div class="txt">Measured tempo and track-level tags agree with an existing playlist — no call needed.</div>
+      <div class="txt"><b id="confidentCount">0</b>&nbsp;tracks</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Playlists to create</h2>
+    <div class="unlocks" id="unlocksWrap"></div>
+  </section>
+
+  <section>
+    <h2>Needs your call</h2>
+    <div id="groupsWrap"></div>
+  </section>
+
+</div>
+
+<footer>
+  <div class="footer-note" id="footerNote">0 tracks will move on the next apply run</div>
+  <button class="btn primary" id="exportBtn2">Export decisions.json</button>
+</footer>
+
+<script>
+/* ---------------------------------------------------------------------------------------------------
+   DATA CONTRACT
+   This page consumes a report.json shaped like:
+   {
+     "generated_at": "2026-08-06T09:00:00",
+     "confident_count": 1842,
+     "unlocks": [ {"id":"bpm_140","label":"140 bpm","count":227}, ... ],
+     "review_groups": [
+       { "id":"genre_artist_tag", "label":"Genre guessed from the artist, not the track",
+         "why":"Last.fm had nothing for the track itself, so the verdict comes from the artist's overall style.",
+         "tracks":[ {"id":"...", "title":"J'arrive","artist":"Ben Mazué","detail":"-> Rap"} , ... ],  // ALL of them
+         "total_count": 812 }
+     ]
+   }
+   It exports decisions.json (unchanged schema - only how it gets computed changed):
+   { "generated_at": "...", "unlocks": {"bpm_140": true, ...},
+     "review": { "genre_artist_tag": {"default":"approved","exceptions":["id1","id2"]} } }
+
+   CHECKBOX SEMANTICS: every checkbox is literal - checked = this track will be included, full stop.
+   "Approve all" / "Leave out" just check/uncheck everything in the group at once; you can still flip
+   any individual track afterwards. The compact default+exceptions encoding above is computed from
+   that literal checked state only when exporting (see buildDecisionsObject), never something you
+   have to think about while reviewing.
+--------------------------------------------------------------------------------------------------- */
+
+function demoTracks(prefix, genre, n, startAt){
+  // generates a plausible-looking demo list so the real UI (scroll/filter/sort) can be tried out
+  const artists = ["Daft Punk","Sean Kingston","Ben Mazué","Ed Sheeran","Toto","Spandau Ballet","a-ha"];
+  return Array.from({length:n}, (_,i)=>({
+    id:`${prefix}${startAt+i}`, title:`Demo Track ${startAt+i}`,
+    artist: artists[(startAt+i) % artists.length], detail:`-> ${genre}`
+  }));
+}
+
+const DEMO = {
+  generated_at: "demo",
+  confident_count: 2854,
+  unlocks: [
+    {id:"bpm_140", label:"140 bpm", count:227, confident:210},
+    {id:"bpm_170", label:"170 bpm", count:143, confident:143},
+    {id:"bpm_150", label:"150 bpm", count:119, confident:119},
+    {id:"bpm_180", label:"180 bpm", count:59, confident:59},
+    {id:"bpm_200", label:"200 bpm", count:18, confident:18},
+    {id:"bpm_60",  label:"60 bpm",  count:16, confident:16},
+  ],
+  review_groups: [
+    {
+      id:"genre_artist_tag", label:"Genre guessed from the artist, not the track",
+      why:"Last.fm had nothing for the track itself — the verdict comes from the artist's overall style.",
+      total_count: 24,
+      tracks:[
+        {id:"t1", title:"J'arrive", artist:"Ben Mazué", detail:"-> Rap"},
+        {id:"t2", title:"Galway Girl", artist:"Ed Sheeran", detail:"-> Rap"},
+        {id:"t3", title:"True", artist:"Spandau Ballet", detail:"-> Rock"},
+        {id:"t4", title:"Everyday", artist:"A$AP Rocky, Rod Stewart", detail:"-> Rap"},
+        {id:"t5", title:"Sunny", artist:"Bonney M", detail:"-> Dance"},
+        {id:"t6", title:"Beautiful Girls", artist:"Sean Kingston", detail:"-> Reggae"},
+        ...demoTracks("t", "Pop", 18, 7),
+      ]
+    },
+    {
+      id:"local_fuzzy_match", label:"Local file matched by a loose search",
+      why:"The title/artist tags in the file looked unusual, so the catalog match is less certain.",
+      total_count: 4,
+      tracks:[
+        {id:"l1", title:"Believer", artist:"Imagine Dragons", detail:"matched via swapped fields"},
+        {id:"l2", title:"Africa", artist:"Toto", detail:"matched via free text"},
+        {id:"l3", title:"Mr. Blue Sky", artist:"Electric Light Orchestra", detail:"matched via free text"},
+        {id:"l4", title:"Take On Me", artist:"a-ha", detail:"matched via swapped fields"},
+      ]
+    },
+    {
+      id:"genre_close_vote", label:"Genre call was close",
+      why:"Two categories were nearly tied — worth a second look.",
+      total_count: 3,
+      tracks:[
+        {id:"c1", title:"Blinding Lights", artist:"The Weeknd", detail:"Electro (2) vs Pop (1)"},
+        {id:"c2", title:"Digital Love", artist:"Daft Punk", detail:"Electro (2) vs Dance (2)"},
+        {id:"c3", title:"Havana", artist:"Camila Cabello, Young Thug", detail:"Latina (2) vs Pop (1)"},
+      ]
+    },
+    {
+      id:"dup_variant", label:"Same title & artist, different file",
+      why:"Could be a genuinely different version (live, remaster) worth keeping separately.",
+      total_count: 4,
+      tracks:[
+        {id:"d1", title:"Wonderwall", artist:"Oasis", detail:"2 versions in Rock"},
+        {id:"d2", title:"Hallelujah", artist:"Jeff Buckley", detail:"2 versions in Pop"},
+        {id:"d3", title:"Yesterday", artist:"The Beatles", detail:"2 versions in Rock"},
+        {id:"d4", title:"Imagine", artist:"John Lennon", detail:"2 versions in Pop"},
+      ]
+    },
+    {
+      id:"genre_itunes", label:"Genre from iTunes (coarse match)",
+      why:"Last.fm knew nothing about this track or its artist; iTunes's broad category is what's left.",
+      total_count: 3,
+      tracks:[
+        {id:"i1", title:"Reign Of Gaming", artist:"League of Legends", detail:"-> SoundTrack"},
+        {id:"i2", title:"Naruto Ending 1", artist:"Naruto", detail:"-> SoundTrack"},
+        {id:"i3", title:"Django", artist:"Luis Bacalov, Rocky Roberts", detail:"-> Classique"},
+      ]
+    },
+    {
+      id:"misplaced_genre", label:"Genre disagrees with where you put it",
+      why:"A second opinion on your own curation, not a verdict - your placement may well be the right one.",
+      total_count: 3,
+      tracks:[
+        {id:"m1", title:"Thrift Shop", artist:"Macklemore & Ryan Lewis, Wanz", detail:"in Pop, tags say Rap"},
+        {id:"m2", title:"True", artist:"Spandau Ballet", detail:"in Pop, tags say Rock"},
+        {id:"m3", title:"L'enculeur d'arbre", artist:"Darktek", detail:"in Rock, tags say Electro"},
+      ]
+    },
+    {
+      id:"bpm_measured", label:"BPM measured from an audio preview, not looked up",
+      why:"No catalog had this tempo on file, so it was estimated by analysing a short preview.",
+      total_count: 3,
+      tracks:[
+        {id:"p1", title:"Piste 07", artist:"Unknown", detail:"~128 bpm (estimated)"},
+        {id:"p2", title:"Old Mixtape Track", artist:"DJ Sample", detail:"~140 bpm (estimated)"},
+        {id:"p3", title:"Live Bootleg", artist:"Local Band", detail:"~95 bpm (estimated)"},
+      ]
+    },
+  ]
+};
+
+let data = DEMO;
+const unlockState = {};    // id -> "create" | "skip"
+const groupChecked = {};   // group id -> Map(track id -> boolean). Literal: true = will be included.
+const groupUi = {};        // group id -> "approved" | "skipped" | undefined, for the buttons' highlight only
+const groupBuilt = {};     // group id -> has its track panel been rendered yet (built lazily, on first expand)
+const groupView = {};      // group id -> {filter, sort} for the currently displayed (filtered/sorted) list
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function init(d){
+  data = d;
+  document.getElementById("confidentCount").textContent = d.confident_count.toLocaleString();
+  data.review_groups.forEach(g => {
+    groupChecked[g.id] = new Map(g.tracks.map(t => [t.id, false]));
+    groupView[g.id] = {filter: "", sort: "title"};
+  });
+  renderUnlocks();
+  renderGroups();
+  recompute();
+}
+
+function renderUnlocks(){
+  const wrap = document.getElementById("unlocksWrap");
+  wrap.innerHTML = "";
+  data.unlocks.forEach(u=>{
+    unlockState[u.id] = unlockState[u.id] || "skip";
+    const el = document.createElement("div");
+    el.className = "unlock";
+    el.innerHTML = `
+      <div class="name">${escapeHtml(u.label)}</div>
+      <div class="count">${u.count.toLocaleString()} tracks waiting</div>
+      <div class="switch">
+        <button data-a="create">Create</button>
+        <button data-a="skip">Not yet</button>
+      </div>`;
+    el.querySelectorAll("button").forEach(b=>{
+      b.onclick = ()=>{ unlockState[u.id]=b.dataset.a; syncUnlockButtons(el,u.id); recompute(); };
+    });
+    syncUnlockButtons(el,u.id);
+    wrap.appendChild(el);
+  });
+}
+function syncUnlockButtons(el,id){
+  el.querySelectorAll("button").forEach(b=>{
+    b.classList.toggle("on", b.dataset.a===unlockState[id]);
+    b.classList.toggle("create", b.dataset.a==="create");
+    b.classList.toggle("skip", b.dataset.a==="skip");
+  });
+}
+
+function renderGroups(){
+  const wrap = document.getElementById("groupsWrap");
+  wrap.innerHTML = "";
+  if(!data.review_groups.length){
+    wrap.innerHTML = `<div class="empty">Nothing needs a manual call. Everything is either confident or already decided.</div>`;
+    return;
+  }
+  data.review_groups.forEach(g=>{
+    const card = document.createElement("div");
+    card.className = "group";
+    card.id = "card_"+g.id;
+    card.innerHTML = `
+      <div class="group-head">
+        <div class="vu" title="Lights up as you include tracks from this group">${Array.from({length:8},(_,i)=>`<i style="height:${6+i*1.3}px"></i>`).join("")}</div>
+        <div class="meta">
+          <div class="reason">${escapeHtml(g.label)}</div>
+          <div class="why">${escapeHtml(g.why)}</div>
+        </div>
+        <div class="count">${g.total_count.toLocaleString()} tracks</div>
+        <div class="group-actions">
+          <button class="gbtn approve" data-a="approved">Approve all</button>
+          <button class="gbtn skip" data-a="skipped">Leave out</button>
+          <button class="gbtn expand">Show tracks (${g.total_count.toLocaleString()})</button>
+        </div>
+      </div>
+      <div class="tracklist" id="tl_${g.id}"></div>`;
+
+    card.querySelector('[data-a="approved"]').onclick = ()=> setGroupDefault(g,"approved");
+    card.querySelector('[data-a="skipped"]').onclick = ()=> setGroupDefault(g,"skipped");
+    card.querySelector(".expand").onclick = ()=> toggleExpand(g);
+    wrap.appendChild(card);
+  });
+}
+
+function toggleExpand(g){
+  const panel = document.getElementById("tl_"+g.id);
+  if(panel.classList.contains("open")){ panel.classList.remove("open"); return; }
+  panel.classList.add("open");
+  if(!groupBuilt[g.id]){
+    groupBuilt[g.id] = true;
+    buildTrackPanel(g, panel);
+  }
+}
+
+function buildTrackPanel(g, panel){
+  panel.innerHTML = `
+    <div class="tl-toolbar">
+      <input type="text" class="tl-filter" placeholder="Filter by title, artist, or destination...">
+      <select class="tl-sort">
+        <option value="title">Sort: title</option>
+        <option value="artist">Sort: artist</option>
+        <option value="detail">Sort: destination</option>
+      </select>
+      <span class="tl-hint">Checked = will be included</span>
+    </div>
+    <div class="tl-rows"></div>
+    <div class="more-note"></div>`;
+  panel.querySelector(".tl-filter").oninput = e => { groupView[g.id].filter = e.target.value; renderTrackRows(g); };
+  panel.querySelector(".tl-sort").value = groupView[g.id].sort;
+  panel.querySelector(".tl-sort").onchange = e => { groupView[g.id].sort = e.target.value; renderTrackRows(g); };
+  renderTrackRows(g);
+}
+
+function renderTrackRows(g){
+  const panel = document.getElementById("tl_"+g.id);
+  const rowsEl = panel.querySelector(".tl-rows");
+  const map = groupChecked[g.id];
+  const {filter, sort} = groupView[g.id];
+  const needle = filter.trim().toLowerCase();
+  let list = !needle ? g.tracks.slice()
+    : g.tracks.filter(t => `${t.title} ${t.artist} ${t.detail}`.toLowerCase().includes(needle));
+  list.sort((a,b) => String(a[sort]||"").localeCompare(String(b[sort]||"")));
+
+  rowsEl.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  list.forEach(t=>{
+    const row = document.createElement("label");
+    row.className = "trow";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!map.get(t.id);
+    cb.onchange = ()=>{ map.set(t.id, cb.checked); recompute(); };
+    const tt = document.createElement("span"); tt.className = "tt";
+    tt.innerHTML = `<b>${escapeHtml(t.title)}</b> <span>— ${escapeHtml(t.artist)}</span>`;
+    const det = document.createElement("span"); det.className = "detail"; det.textContent = t.detail;
+    row.append(cb, tt, det);
+    frag.appendChild(row);
+  });
+  rowsEl.appendChild(frag);
+
+  const note = panel.querySelector(".more-note");
+  if(needle) note.textContent = `Showing ${list.length} of ${g.tracks.length} matching "${filter}".`;
+  else if(g.tracks.length < g.total_count) note.textContent = `Showing the first ${g.tracks.length.toLocaleString()} of ${g.total_count.toLocaleString()} - a very large group; export still covers the rest via the group decision.`;
+  else note.textContent = "";
+}
+
+function setGroupDefault(g, state){
+  const map = groupChecked[g.id];
+  const val = state === "approved";
+  groupUi[g.id] = groupUi[g.id] === state ? undefined : state;  // click again to un-decide
+  if(groupUi[g.id]) map.forEach((_,id)=> map.set(id, val));
+
+  const card = document.getElementById("card_"+g.id);
+  card.classList.remove("state-approved","state-skipped");
+  if(groupUi[g.id]) card.classList.add("state-"+groupUi[g.id]);
+  card.querySelector('[data-a="approved"]').classList.toggle("active", groupUi[g.id]==="approved");
+  card.querySelector('[data-a="skipped"]').classList.toggle("active", groupUi[g.id]==="skipped");
+  if(groupBuilt[g.id]) renderTrackRows(g);  // refresh visible checkboxes to match the new state
+  recompute();
+}
+
+function updateVu(g, checkedCount){
+  const card = document.getElementById("card_"+g.id);
+  if(!card) return;
+  const fraction = g.tracks.length ? checkedCount / g.tracks.length : 0;
+  const litBars = Math.round(fraction * 8);
+  card.querySelectorAll(".vu i").forEach((bar,i)=> bar.classList.toggle("lit", i < litBars));
+}
+
+function recompute(){
+  let reviewIncluded = 0;
+  data.review_groups.forEach(g=>{
+    let checked = 0;
+    groupChecked[g.id].forEach(v => { if(v){ checked++; reviewIncluded++; } });
+    updateVu(g, checked);
+  });
+  // Confident actions waiting on a not-yet-created playlist only count once that playlist is approved -
+  // otherwise they'd be counted here AND again as part of an approved unlock's own total (see Python side).
+  const approvedGatedConfident = data.unlocks
+    .filter(u => unlockState[u.id] === "create")
+    .reduce((s,u) => s + (u.confident || 0), 0);
+  const totalPending = data.review_groups.reduce((s,g)=>s+g.total_count,0);
+  const ready = data.confident_count + approvedGatedConfident;
+  document.getElementById("tallyReady").textContent = ready.toLocaleString();
+  document.getElementById("tallyReview").textContent = reviewIncluded.toLocaleString();
+  document.getElementById("tallySkip").textContent = (totalPending - reviewIncluded).toLocaleString();
+  const total = ready + reviewIncluded;
+  document.getElementById("footerNote").textContent =
+    `${total.toLocaleString()} track${total===1?"":"s"} will move on the next apply run`;
+}
+
+function buildDecisionsObject(){
+  // Turns the literal per-track checked state into the compact {default, exceptions} form the script
+  // expects - whichever side (checked/unchecked) is the MINORITY is stored as the exceptions list,
+  // so approving 2,529 of 2,529 tracks costs a few bytes, not one entry per track.
+  const unlocks = {}; data.unlocks.forEach(u=> unlocks[u.id] = unlockState[u.id]==="create");
+  const review = {};
+  data.review_groups.forEach(g=>{
+    const map = groupChecked[g.id];
+    const checkedIds = g.tracks.filter(t => map.get(t.id)).map(t => t.id);
+    const uncheckedIds = g.tracks.filter(t => !map.get(t.id)).map(t => t.id);
+    if(checkedIds.length >= uncheckedIds.length) review[g.id] = { default: "approved", exceptions: uncheckedIds };
+    else review[g.id] = { default: "skipped", exceptions: checkedIds };
+  });
+  return {generated_at: new Date().toISOString(), unlocks, review};
+}
+
+function exportDecisions(){
+  const blob = new Blob([JSON.stringify(buildDecisionsObject(), null, 2)], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "decisions.json"; a.click();
+}
+
+document.getElementById("exportBtn").onclick = exportDecisions;
+document.getElementById("exportBtn2").onclick = exportDecisions;
+document.getElementById("fileInput").onchange = (e)=>{
+  const file = e.target.files[0]; if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ()=>{
+    try{
+      const parsed = JSON.parse(reader.result);
+      document.getElementById("sourceLabel").textContent = "Loaded: " + file.name;
+      init(parsed);
+    }catch(err){ alert("Could not read this file as JSON: " + err.message); }
+  };
+  reader.readAsText(file);
+};
+
+if (window.__PRELOADED_REPORT__) {
+  document.getElementById("sourceLabel").textContent = "Loaded automatically from your last analysis run";
+  init(window.__PRELOADED_REPORT__);
+} else {
+  init(DEMO);
+}
+</script>
+</body>
+</html>

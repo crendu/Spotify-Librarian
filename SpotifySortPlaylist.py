@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WHAT THIS SCRIPT DOES (read-only: it never modifies your Spotify account)
-  Reads your playlists, then prints + exports 4 CSV reports:
+WHAT THIS SCRIPT DOES
+  A plain run is READ-ONLY: it never changes your Spotify account. It reads your playlists, then prints +
+  exports a report (4 CSVs + report.json):
     1. where each track of the source playlist should go (one "XX bpm" playlist + one genre playlist)
     2. tracks that look misplaced in your existing playlists
     3. duplicates inside each playlist
     4. playlists worth creating (with the tracks waiting for them)
+  Only "--apply" (a second, separate step - see the README) actually writes anything to Spotify, and only
+  after you have reviewed report.json and given it a single explicit confirmation.
 
 HOW TO RUN
     1. Have Python 3. Missing libraries install themselves on first run.
     2. Fill the CONFIG block below (the lines marked with an alert comment).
     3. python SpotifySortPlaylist.py   (first full run takes ~1 h; later runs are fast thanks to the cache)
+    4. review_interface.html opens automatically with this run's report - decide, export your decisions,
+       then "python SpotifySortPlaylist.py --apply" to write the approved changes.
 
 GOOD TO KNOW
   - BPM comes from ReccoBeats, then Deezer (Spotify closed its own endpoint to new apps).
@@ -27,6 +32,7 @@ import re
 import sys
 import logging
 import time
+import webbrowser
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
@@ -85,8 +91,10 @@ MATCH_LOCAL_FILES = True                    # Find their Spotify catalog equival
 MAX_LOCAL_MATCH_PER_RUN = 700               # Spotify allows ~750 calls/day; 0 = no cap (one big run)
 LOCAL_MATCH_PACE = 0.8                      # Seconds between two searches (Spotify punishes bursts)
 
+AUTO_OPEN_REVIEW = True                     # Open review_interface.html in your browser at the end of a run, already loaded with this run's report
+
 ANALYZE_DEEZER_PREVIEWS = False             # Measure missing BPMs from 30 s previews (slow; installs librosa)
-CHECK_ALL_PLAYLISTS_FOR_DUPLICATES = False  # Turning this on also checks every OTHER playlist YOU OWN
+CHECK_ALL_PLAYLISTS_FOR_DUPLICATES = False  # Also checks every OTHER playlist YOU OWN (never ones you merely follow, like Discover Weekly)
 INCLUDE_LIKED_SONGS = False                 # Also sort your "Liked Songs" library (adds ~1 call per 50 liked)
 
 # TEST MODE - paste track links here (right-click a track > Share > Copy link) to test the external APIs
@@ -94,12 +102,12 @@ INCLUDE_LIKED_SONGS = False                 # Also sort your "Liked Songs" libra
 TEST_EXTERNES = [
     # "https://open.spotify.com/intl-fr/track/5KjJYrM3UXmvhqtQntrsJM?si=e7311651acdd4323",
 ]
-SPOTIFY_TRACK_FALLBACK = True               # in test mode: 1 Spotify call to identify a ReccoBeats-unknown track
+SPOTIFY_TRACK_FALLBACK = True   # in test mode: 1 Spotify call to identify a ReccoBeats-unknown track
 
 # ----------------------------------------------------------------------------------------------------------------------
 # ZONE 3 - FINE AS-IS (how the sorting thinks; change only to tune the logic)
 # ----------------------------------------------------------------------------------------------------------------------
-SPOTIFY_REDIRECT_URI = "http://127.0.0.1:8888/callback"     # must equal the Redirect URI in the app settings
+SPOTIFY_REDIRECT_URI = "http://127.0.0.1:8888/callback" # must equal the Redirect URI in the app settings
 
 BPM_STEP = 10                   # "80 bpm" bucket = 80.0 to 89.9 (truncated to the lower ten)
 SHOW_HALF_DOUBLE_TEMPO = True   # a 154 bpm track can "feel" like 77: show the alternative bucket
@@ -113,17 +121,17 @@ GENRE_RULES = [
     ("Jazz",       ["jazz", "bebop", "swing", "bossa nova", "big band"]),
     ("Reggae",     ["reggae", "dancehall", "ska", "dub", "roots", "rocksteady", "rock steady"]),
     ("Rap",        ["rap", "hip hop", "hip-hop", "hiphop", "trap", "drill", "grime", "boom bap", "phonk"]),
-    ("Soul",       ["soul", "r&b", "rnb", "r&b/soul", "funk", "motown", "gospel"]),
+    ("Soul",       ["soul", "r&b", "rnb", "r&b/soul", "funk", "motown", "gospel", "doo wop"]),
     ("Electro",    ["electro", "edm", "house", "techno", "tekno", "hardtek", "tribe", "trance", "dubstep", "drum and bass",
                     "dnb", "jungle", "bass music", "synthwave", "big room", "uk garage", "future garage", "speed garage",
                     "hardcore techno", "happy hardcore", "gabber", "frenchcore", "electro swing", "drill and bass", "lofi",
                     "lo-fi", "ambient", "chillout", "downtempo", "trip hop", "trip-hop", "idm", "psytrance", "hardstyle"]),
     ("Dance",      ["dance pop", "dance", "disco", "eurodance", "hyperpop"]),
-    ("Rock",       ["rock", "metal", "punk", "grunge", "emo", "screamo", "hardcore", "shoegaze", "garage", "blues", "new wave", "rock opera"]),
-    ("SoundTrack", ["soundtrack", "film score", "game music", "video game music", "anime", "ost",
+    ("Rock",       ["rock", "metal", "punk", "grunge", "emo", "screamo", "hardcore", "shoegaze", "garage", "blues", "new wave", "rock opera", "alternative"]),
+    ("SoundTrack", ["soundtrack", "film score", "game music", "video game music", "video game", "anime", "ost",
                     "bande originale", "film music", "theme song", "composer"]),
     ("Française",  ["french", "chanson", "variete francaise", "variété française", "francoton"]),
-    ("Pop",        ["pop", "indie", "singer-songwriter", "synthpop", "britpop", "folk", "country", "americana", "baroque pop", "chamber pop"]),  # catch-all, keep last
+    ("Pop",        ["pop", "indie", "singer-songwriter", "singer/songwriter", "synthpop", "britpop", "folk", "country", "americana", "baroque pop", "chamber pop"]),  # catch-all, keep last
 ]
 
 # A tag written here goes straight to its category, before any keyword logic (perfect for the report's "unmapped tags" list,
@@ -156,7 +164,7 @@ MAX_ARTIST_LOOKUPS = 200
 USE_DEEZER_BPM_FALLBACK = True      # BPM by artist+title when ReccoBeats does not know the exact id
 USE_ITUNES_GENRE_FALLBACK = True    # coarse genre by artist+title when Last.fm knows nothing
 
-OUTPUT_DIR = "rapport_spotify"          # folder for the report CSVs
+OUTPUT_DIR = "rapport_spotify"          # folder for the report (CSVs, report.json, review.html)
 CACHE_FILE = "cache_spotify_tri.json"   # the project's memory: do NOT delete it
 DECISIONS_FILE = "decisions.json"       # where --apply looks for your reviewed decisions (see below)
 
@@ -172,7 +180,7 @@ SCOPES = "playlist-read-private playlist-read-collaborative" + (" user-library-r
 # ======================================================================================================================
 
 GENRE_PLAYLIST_NAMES = [name for name, _ in GENRE_RULES]
-_SPOTIFY_ID_RE = re.compile(r"[A-Za-z0-9]{22}")   # a Spotify track/playlist id is 22 base62 characters
+_SPOTIFY_ID_RE = re.compile(r"[A-Za-z0-9]{22}") # a Spotify track/playlist id is 22 base62 characters
 
 # Env vars as fallback when the fields above are empty (avoids committing secrets).
 SPOTIFY_CLIENT_ID     = SPOTIFY_CLIENT_ID or os.environ.get("SPOTIPY_CLIENT_ID", "")
@@ -190,7 +198,7 @@ if PROXY_URL:
 if USE_SYSTEM_CERTS:
     _ts = _ensure_package("truststore")
     if _ts:
-        _ts.inject_into_ssl()  # Python now validates against the OS certificate store
+        _ts.inject_into_ssl()   # Python now validates against the OS certificate store
     else:
         print("INFO: running without 'truststore' - needed behind an SSL-inspecting proxy, harmless otherwise.",
               file=sys.stderr)
@@ -257,14 +265,22 @@ def quota_exit(context, retry_after=None):
              f"Cache saved: the next run only fetches what is missing.")
 
 def spotify_call(fn, context, attempts=4):
-    """Runs one Spotify call, retrying a few times on network hiccups (proxy glitches). Quota exhausted (429) = save the
-    cache and stop cleanly."""
+    """Runs one Spotify call, retrying on network hiccups AND on a SHORT-lived 429 (Retry-After <= 30s - Spotify's burst
+    throttle, easy to mistake for the daily quota). A long or absent Retry-After means the daily quota is genuinely
+    exhausted: save the cache and stop cleanly right away, no point waiting."""
     for attempt in range(1, attempts + 1):
         try:
             return fn()
         except spotipy.exceptions.SpotifyException as e:
             if e.http_status == 429:
-                quota_exit(context, (getattr(e, "headers", None) or {}).get("Retry-After"))
+                retry_after = (getattr(e, "headers", None) or {}).get("Retry-After")
+                short = int(retry_after) if (retry_after or "").isdigit() else None
+                if short is not None and short <= 30 and attempt < attempts:
+                    print(f"  ! Spotify rate-limit on {context} -> pausing {short}s (attempt {attempt}/{attempts - 1}, "
+                          f"looks like a short burst, not the daily quota)", file=sys.stderr)
+                    time.sleep(short)
+                    continue
+                quota_exit(context, retry_after)
             raise
         except requests.exceptions.RequestException as e:
             if attempt == attempts:
@@ -313,8 +329,7 @@ def get_client() -> spotipy.Spotify:
                  + "\n\n  * ".join(problems)
                  + "\n\nFix the line(s) above in the CONFIG block at the top of the file, save, and run again.")
     # status_retries=0: on a 429 (quota), spotipy raises immediately instead of sleeping for hours
-    auth = SpotifyOAuth(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, redirect_uri=SPOTIFY_REDIRECT_URI,
-                        scope=SCOPES, open_browser=True, cache_path=".spotify_token_cache")
+    auth = SpotifyOAuth(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, redirect_uri=SPOTIFY_REDIRECT_URI, scope=SCOPES, open_browser=True, cache_path=".spotify_token_cache")
     return spotipy.Spotify(auth_manager=auth, retries=3, status_retries=0, requests_timeout=15)
 
 def fetch_all(sp, first_page, context="pagination"):
@@ -366,10 +381,9 @@ def get_playlist_tracks(sp, playlist_id, snapshot_id=None):
     api_total, received, skipped = None, 0, {}
     while True:
         try:
-            page = spotify_call(lambda o=offset: sp._get(f"playlists/{playlist_id}/items", limit=100, offset=o),
-                                f"reading playlist {playlist_id}")
+            page = spotify_call(lambda o=offset: sp._get(f"playlists/{playlist_id}/items", limit=100, offset=o), f"reading playlist {playlist_id}")
         except spotipy.exceptions.SpotifyException:
-            new_ok = offset > 0  # failure on the very first page -> we will try the old endpoint
+            new_ok = offset > 0 # failure on the very first page -> we will try the old endpoint
             break
         if api_total is None:
             api_total = page.get("total")
@@ -391,8 +405,7 @@ def get_playlist_tracks(sp, playlist_id, snapshot_id=None):
     # 2) fallback: old /tracks endpoint via spotipy (pre-migration apps)
     if not new_ok and not tracks:
         try:
-            page = spotify_call(lambda: sp.playlist_items(playlist_id, additional_types=("track",)),
-                                f"reading playlist {playlist_id} (old endpoint)")
+            page = spotify_call(lambda: sp.playlist_items(playlist_id, additional_types=("track",)), f"reading playlist {playlist_id} (old endpoint)")
             tracks = _parse_playlist_items(fetch_all(sp, page, f"playlist {playlist_id}"))
             complete = True
         except spotipy.exceptions.SpotifyException as e:
@@ -433,7 +446,7 @@ def get_liked_tracks(sp):
     except (spotipy.exceptions.SpotifyException, requests.exceptions.RequestException) as e:
         tracks = _parse_playlist_items(items)
         _liked_songs_failure(e, len(tracks))
-        return tracks  # partial read: not cached as "complete", so a later run finishes the job
+        return tracks   # partial read: not cached as "complete", so a later run finishes the job
     tracks = _parse_playlist_items(items)
     _cache["playlists"]["__liked__"] = {"snapshot_id": str(total), "tracks": [dict(t) for t in tracks]}
     _cache_dirty += 1
@@ -447,7 +460,7 @@ def get_my_playlists(sp):
 # ======================================================================================================================
 # BPM: Spotify -> ReccoBeats fallback (with disk cache, backoff and circuit breaker)
 # ======================================================================================================================
-_reccobeats_failures = 0  # consecutive failures -> circuit breaker
+_reccobeats_failures = 0    # consecutive failures -> circuit breaker
 
 def _reccobeats_get(endpoint, ids):
     """One ReccoBeats request with retries; honours "slow down" (429) answers.
@@ -478,7 +491,7 @@ def _reccobeats_get(endpoint, ids):
         print("     ! ReccoBeats: 3 failed batches -> stopping for this run (cache keeps the rest)", file=sys.stderr)
     return None
 
-_RB_ID_RE = re.compile(r"track/([A-Za-z0-9]+)")  # compiled once: href = .../track/{spotify_id}
+_RB_ID_RE = re.compile(r"track/([A-Za-z0-9]+)") # compiled once: href = .../track/{spotify_id}
 
 def get_tempos(sp, tracks_by_id):
     """Finds the BPM of every track: cache, then Spotify, then ReccoBeats (by id), then Deezer (by artist+title), then
@@ -527,7 +540,7 @@ def get_tempos(sp, tracks_by_id):
         content = _reccobeats_get("audio-features", rb_ids[i:i + 40])
         if content is None:
             if _reccobeats_failures >= 3:
-                break  # circuit breaker: no point insisting on the remaining batches
+                break   # circuit breaker: no point insisting on the remaining batches
             continue
         for item in content:
             m = _RB_ID_RE.search(item.get("href", ""))
@@ -538,7 +551,7 @@ def get_tempos(sp, tracks_by_id):
                 _cache_dirty += 1
                 found += 1
         save_cache()
-        time.sleep(0.5)  # politeness
+        time.sleep(0.5) # politeness
     save_cache(force=True)
     missing = [tid for tid, v in tempos.items() if v is None]
     stage("ReccoBeats", found, len(missing),
@@ -570,7 +583,7 @@ def get_tempos(sp, tracks_by_id):
         print(f"  * previews   : {len(still2)} to try (30 s downloads + local tempo analysis, ~3 s each)")
         measured = 0
         for n, tid in enumerate(still2, 1):
-            url = _preview_urls.get(tid)  # collected by the Deezer stage, keyed by this track's ID
+            url = _preview_urls.get(tid)    # collected by the Deezer stage, keyed by this track's ID
             if not url:
                 continue
             bpm = measure_preview_bpm(url)
@@ -624,7 +637,7 @@ def get_deezer_bpm(artist, title, tid=None):
         if bpm > 0:
             return round(float(bpm), 1)
         if tid and d.get("preview"):
-            _preview_urls[tid] = d["preview"]  # kept for the optional local analysis stage, keyed by Spotify ID
+            _preview_urls[tid] = d["preview"]   # kept for the optional local analysis stage, keyed by Spotify ID
         return None
     except (requests.RequestException, ValueError, KeyError) as e:
         _deezer_failures += 1
@@ -632,13 +645,13 @@ def get_deezer_bpm(artist, title, tid=None):
             print("     ! Deezer: 5 straight failures -> stopping for this run", file=sys.stderr)
         return None
     finally:
-        time.sleep(0.3)  # Deezer allows ~50 req / 5 s; two calls per track -> stay well under
+        time.sleep(0.3) # Deezer allows ~50 req / 5 s; two calls per track -> stay well under
 
 def measure_preview_bpm(preview_url):
     """Downloads a 30 s Deezer preview and measures its tempo with librosa (installed automatically on first use).
     Beat trackers sometimes lock on half/double tempo: treat as an estimate."""
     import io
-    librosa = _ensure_package("librosa")  # heavy: pulls numpy/scipy/soundfile, one-time ~1-2 min install
+    librosa = _ensure_package("librosa")    # heavy: pulls numpy/scipy/soundfile, one-time ~1-2 min install
     if librosa is None:
         return "no-librosa"
     try:
@@ -661,10 +674,9 @@ def get_itunes_genre(artist, title):
     if _itunes_failures >= 5:
         return None
     try:
-        r = _http.get(ITUNES_URL, params={"term": f"{artist.split(',')[0].strip()} {_clean_title(title)}",
-                                          "media": "music", "limit": 1}, timeout=15)
-        time.sleep(3)  # stay under Apple's unofficial ~20 req/min tolerance
-        if r.status_code == 403:  # throttled: back off once, then count as failure
+        r = _http.get(ITUNES_URL, params={"term": f"{artist.split(',')[0].strip()} {_clean_title(title)}", "media": "music", "limit": 1}, timeout=15)
+        time.sleep(3)   # stay under Apple's unofficial ~20 req/min tolerance
+        if r.status_code == 403:    # throttled: back off once, then count as failure
             time.sleep(30)
             _itunes_failures += 1
             return None
@@ -672,7 +684,7 @@ def get_itunes_genre(artist, title):
         hits = r.json().get("results", [])
         genre = (hits[0].get("primaryGenreName") or "").lower() if hits else ""
         _itunes_failures = 0
-        _cache["lastfm"][key] = genre  # "" cached too: a real miss should not be re-asked
+        _cache["lastfm"][key] = genre   # "" cached too: a real miss should not be re-asked
         _cache_dirty += 1
         save_cache()
         return genre or None
@@ -720,7 +732,7 @@ def get_artist_genres(sp, artist_ids):
             print(f"  ! Spotify artist genres unavailable ({e.http_status}) -> fallback abandoned", file=sys.stderr)
     return out
 
-_lastfm_fail_streak = 0  # consecutive failures -> circuit breaker (avoids 2000 calls doomed to fail)
+_lastfm_fail_streak = 0 # consecutive failures -> circuit breaker (avoids 2000 calls doomed to fail)
 _lastfm_disabled = False
 
 def _lastfm_get(params, verbose=False):
@@ -758,7 +770,7 @@ def _lastfm_get(params, verbose=False):
 
 def _extract_tags(data, root):
     raw = (data or {}).get(root, {}).get("tag", [])
-    if isinstance(raw, dict):  # Last.fm returns a dict (not a list) when there is a single tag
+    if isinstance(raw, dict):   # Last.fm returns a dict (not a list) when there is a single tag
         raw = [raw]
     return [t["name"].lower() for t in raw if int(t.get("count", 0)) >= LASTFM_MIN_TAG_COUNT][:10]
 
@@ -772,13 +784,13 @@ def get_lastfm_track_tags(artist, title, verbose=False):
     if not LASTFM_API_KEY:
         return []
     data = _lastfm_get({"method": "track.gettoptags", "artist": artist, "track": title, "autocorrect": 1}, verbose=verbose)
-    time.sleep(0.25)  # honour the Last.fm rate limit
+    time.sleep(0.25)    # honour the Last.fm rate limit
     if data is None:
         return []
     tags = _extract_tags(data, "toptags")
     _cache["lastfm"][key] = tags
     _cache_dirty += 1
-    save_cache()  # periodic save (every ~50 new lookups)
+    save_cache()    # periodic save (every ~50 new lookups)
     return tags
 
 def get_lastfm_artist_tags(artist, verbose=False):
@@ -803,8 +815,7 @@ def get_lastfm_artist_tags(artist, verbose=False):
 # the few prefix keywords below intentionally match their derivatives (electro -> electronic(a)).
 _PREFIX_KWS = {"orchestr", "electro"}
 _CAT_RANK = {cat: rank for rank, (cat, _) in enumerate(GENRE_RULES)}
-_KW_PATTERNS = [(rank, cat, kw, re.compile(r"\b" + re.escape(kw) + ("" if kw in _PREFIX_KWS else r"\b")))
-                for rank, (cat, kws) in enumerate(GENRE_RULES) for kw in kws]
+_KW_PATTERNS = [(rank, cat, kw, re.compile(r"\b" + re.escape(kw) + ("" if kw in _PREFIX_KWS else r"\b"))) for rank, (cat, kws) in enumerate(GENRE_RULES) for kw in kws]
 
 def _tag_vote(tag):
     """Gives ONE vote for one tag: an EXPLICIT_GENRE_MAP pin wins outright; otherwise the category with the LONGEST
@@ -935,13 +946,55 @@ def classify_genre(genre_src, close_vote):
 def _slug(label):
     return re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
 
+def open_review_interface(report_path):
+    """Opens review_interface.html in your browser with THIS run's report already loaded - no manual
+    "Load report.json" click needed. Looks for the template next to this script. This is a pure
+    convenience: any failure (template missing, no browser available) is reported on one line and
+    skipped, it never affects the analysis or its output files."""
+    if not AUTO_OPEN_REVIEW:
+        return
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    template_path = os.path.join(script_dir, "review_interface.html")
+    if not os.path.exists(template_path):
+        print(f"(review_interface.html not found next to the script - skipping auto-open; download it "
+              f"and place it alongside {os.path.basename(__file__)} to enable this.)")
+        return
+    try:
+        with open(template_path, encoding="utf-8") as f:
+            html = f.read()
+        with open(report_path, encoding="utf-8") as f:
+            report_text = f.read()
+        marker = "<script>\n"  # the review page's single <script> block: inject just before it
+        if marker not in html:
+            print("(review_interface.html looks different than expected - skipping auto-open.)")
+            return
+        safe_json = report_text.replace("</", "<\\/")  # never let a track title/artist close our <script> early
+        preload = f"<script>window.__PRELOADED_REPORT__ = {safe_json};</script>\n"
+        rendered_path = os.path.join(OUTPUT_DIR, "review.html")
+        with open(rendered_path, "w", encoding="utf-8") as f:
+            f.write(html.replace(marker, preload + marker))
+        webbrowser.open(_local_file_uri(rendered_path))
+        print(f"  -> opened {rendered_path} in your browser (already loaded with this run's report)")
+    except OSError as e:
+        print(f"(could not auto-open the review interface: {e})", file=sys.stderr)
+
+def _local_file_uri(path):
+    """A file:// URI that works with webbrowser.open() on both Windows and Unix-like systems."""
+    abs_path = os.path.abspath(path).replace(os.sep, "/")
+    return "file:///" + abs_path if not abs_path.startswith("/") else "file://" + abs_path
+
+MAX_TRACKS_PER_GROUP_IN_REPORT = 5000   # safety valve for a pathologically huge group; never hit in practice
+
 def export_report(actions, to_create_bpm, to_create_genre, path):
-    """Writes report.json: a human-friendly, grouped view of every pending action, for
-    review_interface.html. Full per-track detail for execution lives in memory only (re-derived
-    fresh every run from your live playlists + cache - see --apply)."""
-    unlocks = ([{"id": f"bpm_{b}", "label": f"{b} bpm", "count": len(v)} for b, v in sorted(to_create_bpm.items())]
-              + [{"id": f"genre_{_slug(g)}", "label": g, "count": len(v)} for g, v in sorted(to_create_genre.items())])
-    confident_count = sum(1 for a in actions if a["tier"] == "confident")
+    """Writes report.json: a human-friendly, grouped view of every pending action, for review_interface.html - the FULL track
+    list per review group (not just a sample), so the interface can show, filter, and sort every one of them, not only a preview."""
+    confident_gated = defaultdict(int)
+    for a in actions:
+        if a["tier"] == "confident" and a.get("needs_create") and a.get("unlock_id"):
+            confident_gated[a["unlock_id"]] += 1
+    unlocks = ([{"id": f"bpm_{b}", "label": f"{b} bpm", "count": len(v), "confident": confident_gated[f"bpm_{b}"]} for b, v in sorted(to_create_bpm.items())]
+              + [{"id": f"genre_{_slug(g)}", "label": g, "count": len(v), "confident": confident_gated[f"genre_{_slug(g)}"]} for g, v in sorted(to_create_genre.items())])
+    confident_count = sum(1 for a in actions if a["tier"] == "confident" and not a.get("needs_create"))
     by_group = defaultdict(list)
     for a in actions:
         if a["tier"] == "review":
@@ -949,10 +1002,10 @@ def export_report(actions, to_create_bpm, to_create_genre, path):
     review_groups = []
     for gid, acts in by_group.items():
         label, why = REVIEW_GROUPS[gid]
-        samples = [{"id": a["track_id"], "title": a["track_name"], "artist": a["track_artist"],
-                   "detail": f"-> {a['target']}" if a["type"] == "add_track" else
-                             f"-> {a.get('to_playlist_name', 'remove')}"} for a in acts[:8]]
-        review_groups.append({"id": gid, "label": label, "why": why, "total_count": len(acts), "shown_count": len(samples), "samples": samples})
+        tracks = [{"id": a["track_id"], "title": a["track_name"], "artist": a["track_artist"],
+                  "detail": f"-> {a['target']}" if a["type"] == "add_track" else
+                            f"-> {a.get('to_playlist_name', 'remove')}"} for a in acts[:MAX_TRACKS_PER_GROUP_IN_REPORT]]
+        review_groups.append({"id": gid, "label": label, "why": why, "total_count": len(acts), "tracks": tracks})
     review_groups.sort(key=lambda g: -g["total_count"])
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "confident_count": confident_count,
@@ -1028,8 +1081,7 @@ def run_external_test():
             print(f"   ! Spotify connection impossible ({type(ex).__name__}) -> fallback abandoned")
         print()
     elif still:
-        print("0bis) Spotify fallback disabled (SPOTIFY_TRACK_FALLBACK=False): "
-              f"{len(still)} track(s) will remain unidentified\n")
+        print(f"0bis) Spotify fallback disabled (SPOTIFY_TRACK_FALLBACK=False): {len(still)} track(s) will remain unidentified\n")
 
     # --- 1) ReccoBeats: BPM in a single batch
     print("1) ReccoBeats (BPM):")
@@ -1086,7 +1138,9 @@ def _norm(s):
 def match_local_tracks(sp, tracks):
     """Finds the Spotify catalog equivalent of each local file so it becomes sortable.
     Up to 3 searches per file, each only if the previous failed: normal fields, swapped fields (rescues inverted MP3 tags), free text.
-    Hits AND misses are cached; the per-run cap counts search calls."""
+    Hits AND misses are cached; the per-run cap counts search calls.
+    If the daily quota runs out here, it stops cleanly with whatever was matched so far and lets the rest of the analysis
+    (BPM/genre, both non-Spotify) run to completion - see the try/except below."""
     global _cache_dirty
     locals_ = [t for t in tracks if t.get("local")]
     if not locals_ or not MATCH_LOCAL_FILES:
@@ -1107,50 +1161,59 @@ def match_local_tracks(sp, tracks):
         cap = f", capped at {MAX_LOCAL_MATCH_PER_RUN} search calls this run" if MAX_LOCAL_MATCH_PER_RUN else ""
         print(f"  * local match: {to_do} local file(s) to search (1-3 calls each{cap})")
     calls = matched = 0
-    for t in locals_:
-        key = t.get("local_id") or t["id"]  # synthetic local::artist::title, stable across runs
-        hit = _cache["localmatch"].get(key)
-        if eligible(hit):
-            if MAX_LOCAL_MATCH_PER_RUN and calls >= MAX_LOCAL_MATCH_PER_RUN:
-                continue
-            main = t["artists"].split(",")[0].strip()
-            title = _clean_title(t["name"])
-            attempts = [f'track:"{title}" artist:"{main}"',
-                        f'track:"{main}" artist:"{title}"',      # swapped tags rescue
-                        f"{title} {main}"]                        # free-text rescue
-            hit = {"id": "", "name": "", "artists": "", "v": 2}
-            aborted = False
-            for mode, q in enumerate(attempts, 1):
+    quota_hit = False
+    try:
+        for t in locals_:
+            key = t.get("local_id") or t["id"]  # synthetic local::artist::title, stable across runs
+            hit = _cache["localmatch"].get(key)
+            if eligible(hit):
                 if MAX_LOCAL_MATCH_PER_RUN and calls >= MAX_LOCAL_MATCH_PER_RUN:
-                    aborted = True  # cap hit mid-track: not cached, cleanly redone next run
-                    break
-                calls += 1
-                time.sleep(LOCAL_MATCH_PACE)  # paced: Spotify rate-limits bursts on a rolling window
-                if calls % 100 == 0:
-                    print(f"      ... {calls} search calls, {matched} matched")
-                try:
-                    res = spotify_call(lambda q=q: sp.search(q=q, type="track", limit=3), "local file matching")
-                except spotipy.exceptions.SpotifyException:
-                    aborted = True
-                    break
-                for cand in (res.get("tracks", {}) or {}).get("items", []):
-                    if acceptable(cand, t["name"], main):
-                        hit = {"id": cand["id"], "name": cand["name"], "mode": mode,
-                               "artists": ", ".join(a["name"] for a in cand.get("artists", [])), "v": 2}
+                    continue
+                main = t["artists"].split(",")[0].strip()
+                title = _clean_title(t["name"])
+                attempts = [f'track:"{title}" artist:"{main}"',
+                            f'track:"{main}" artist:"{title}"', # swapped tags rescue
+                            f"{title} {main}"]                  # free-text rescue
+                hit = {"id": "", "name": "", "artists": "", "v": 2}
+                aborted = False
+                for mode, q in enumerate(attempts, 1):
+                    if MAX_LOCAL_MATCH_PER_RUN and calls >= MAX_LOCAL_MATCH_PER_RUN:
+                        aborted = True  # cap hit mid-track: not cached, cleanly redone next run
                         break
-                if hit["id"]:
-                    break
-            if not aborted:
-                _cache["localmatch"][key] = hit
-                _cache_dirty += 1
-                save_cache()
-        if hit and hit.get("id"):
-            t["local_id"], t["id"], t["matched"] = key, hit["id"], True
-            t["match_mode"] = hit.get("mode", 1)    # 1=normal fields, 2=swapped, 3=free text (weaker signal)
-            t["artist_ids"] = []  # unknown, and unused (genre goes through the name-based cascade anyway)
-            matched += 1
+                    calls += 1
+                    time.sleep(LOCAL_MATCH_PACE)    # paced: Spotify rate-limits bursts on a rolling window
+                    if calls % 100 == 0:
+                        print(f"      ... {calls} search calls, {matched} matched")
+                    try:
+                        res = spotify_call(lambda q=q: sp.search(q=q, type="track", limit=3), "local file matching")
+                    except spotipy.exceptions.SpotifyException:
+                        aborted = True
+                        break
+                    for cand in (res.get("tracks", {}) or {}).get("items", []):
+                        if acceptable(cand, t["name"], main):
+                            hit = {"id": cand["id"], "name": cand["name"], "mode": mode, "artists": ", ".join(a["name"] for a in cand.get("artists", [])), "v": 2}
+                            break
+                    if hit["id"]:
+                        break
+                if not aborted:
+                    _cache["localmatch"][key] = hit
+                    _cache_dirty += 1
+                    save_cache()
+            if hit and hit.get("id"):
+                t["local_id"], t["id"], t["matched"] = key, hit["id"], True
+                t["match_mode"] = hit.get("mode", 1)    # 1=normal fields, 2=swapped, 3=free text (weaker signal)
+                t["artist_ids"] = []                    # unknown, and unused (genre goes through the name-based cascade anyway)
+                matched += 1
+    except SystemExit:
+        # quota_exit() already saved the cache and printed its own message.
+        quota_hit = True
+        print(f"  ! Local-file matching stopped after {calls} search call(s) (quota) - {matched} matched so far;\n"
+              f"    the rest of the analysis still runs on what's available, and the remaining "
+              f"{sum(1 for t in locals_ if eligible(_cache['localmatch'].get(t.get('local_id') or t['id'])))} "
+              f"file(s) resume next run.", file=sys.stderr)
     save_cache(force=True)
-    print(f"  * local match: {matched}/{len(locals_)} matched on the Spotify catalog ({calls} search calls this run)")
+    if not quota_hit:
+        print(f"  * local match: {matched}/{len(locals_)} matched on the Spotify catalog ({calls} search calls this run)")
 
 # ======================================================================================================================
 # REAL DATA GATHERING
@@ -1162,7 +1225,7 @@ def gather_real_data(sp, user_id):
     print("Reading your playlists...")
     all_playlists = get_my_playlists(sp)
     snapshots = {p["id"]: p.get("snapshot_id") for p in all_playlists}  # for cache invalidation
-    bpm_playlists, genre_playlists = {}, {}  # {60: {"id","name"}} / {"Pop": {"id","name"}}
+    bpm_playlists, genre_playlists = {}, {} # {60: {"id","name"}} / {"Pop": {"id","name"}}
     for p in all_playlists:
         name = p["name"].strip()
         m = re.fullmatch(r"(\d{2,3})\s*bpm", name, re.IGNORECASE)
@@ -1185,7 +1248,7 @@ def gather_real_data(sp, user_id):
         print("!! Common causes: different name (space, case, accent), or a different Spotify account.\n")
 
     # ---------------- Contents of every relevant playlist ----------------
-    contents = {}  # {playlist_name: [tracks]}
+    contents = {}   # {playlist_name: [tracks]}
     for info in list(bpm_playlists.values()) + list(genre_playlists.values()):
         contents[info["name"]] = get_playlist_tracks(sp, info["id"], snapshots.get(info["id"]))
         print(f"  {info['name']:<12} : {len(contents[info['name']])} tracks")
@@ -1195,7 +1258,7 @@ def gather_real_data(sp, user_id):
     src_meta = next((p for p in all_playlists if p["id"] == SOURCE_PLAYLIST_ID), None)
     source_name = src_meta["name"] if src_meta else "Source playlist"
     content_ids = {info["name"]: info["id"] for info in list(bpm_playlists.values()) + list(genre_playlists.values())}
-    contents[source_name] = list(source_tracks)  # a COPY: duplicate-checking must ignore the liked-songs merge below
+    contents[source_name] = list(source_tracks) # a COPY: duplicate-checking must ignore the liked-songs merge below
     content_ids[source_name] = SOURCE_PLAYLIST_ID
 
     if not source_tracks:
@@ -1209,7 +1272,7 @@ def gather_real_data(sp, user_id):
         except Exception as e:
             print(f"!!   Could not read the playlist metadata: {e}")
         try:
-            raw = sp.playlist_items(SOURCE_PLAYLIST_ID, limit=3)  # old endpoint, raw response
+            raw = sp.playlist_items(SOURCE_PLAYLIST_ID, limit=3)    # old endpoint, raw response
             items = raw.get("items", [])
             print(f"!!   Old /tracks endpoint: total={raw.get('total', '?')}, page-1 items={len(items)}")
             for it in items[:2]:
@@ -1218,7 +1281,7 @@ def gather_real_data(sp, user_id):
         except Exception as e:
             print(f"!!   Old /tracks endpoint: error {e}")
         try:
-            raw2 = sp._get(f"playlists/{SOURCE_PLAYLIST_ID}/items", limit=3)  # new 02/2026 endpoint
+            raw2 = sp._get(f"playlists/{SOURCE_PLAYLIST_ID}/items", limit=3)    # new 02/2026 endpoint
             items2 = raw2.get("items", [])
             print(f"!!   New /items endpoint: total={raw2.get('total', '?')}, page-1 items={len(items2)}")
             for it in items2[:2]:
@@ -1239,7 +1302,8 @@ def gather_real_data(sp, user_id):
 
     # ---------------- Optional add-ons: Liked Songs, then duplicate-scan of every other owned playlist ----------------
     # Both only add value on top of the core sort; neither should cost you progress on the above if the daily quota runs
-    # out here - Liked Songs already degrades gracefully, and the loop below is wrapped the same way.
+    # out here - Liked Songs already degrades gracefully, and the loop below is wrapped the same way (a 429 keeps whatever
+    # was already read and moves on rather than aborting the whole run).
     if INCLUDE_LIKED_SONGS:
         seen = {t["id"] for t in source_tracks}
         liked = [dict(t, liked=True) for t in get_liked_tracks(sp) if t["id"] not in seen]
@@ -1406,8 +1470,7 @@ def apply_actions(sp, actions, to_create_bpm, to_create_genre, playlist_id_by_na
     name_to_id = dict(playlist_id_by_name)
     for uid, label in to_create:
         print(f"  Creating playlist '{label}'...")
-        pl = spotify_call(lambda label=label: sp.current_user_playlist_create(label, public=False),
-                          f"create playlist {label}")
+        pl = spotify_call(lambda label=label: sp.current_user_playlist_create(label, public=False), f"create playlist {label}")
         name_to_id[label] = pl["id"]
 
     # additions (a track waiting for a new playlist AND the "to" side of a move both land here)
@@ -1437,8 +1500,7 @@ def apply_actions(sp, actions, to_create_bpm, to_create_genre, playlist_id_by_na
         pname = entries[0][2]
         for i in range(0, len(entries), 100):
             items = [{"uri": tid, "positions": [pos]} for pos, tid, _ in entries[i:i + 100]]
-            spotify_call(lambda pid=pid, items=items: sp.playlist_remove_specific_occurrences_of_items(pid, items),
-                        f"remove from {pname}")
+            spotify_call(lambda pid=pid, items=items: sp.playlist_remove_specific_occurrences_of_items(pid, items), f"remove from {pname}")
         print(f"  Removed {len(entries)} track(s) from '{pname}'")
     print("\nDone. Your Spotify account has been updated.")
 
@@ -1449,7 +1511,7 @@ def main(apply_mode=False):
         sys.exit("The script cannot start: something in the CONFIG block needs fixing.\n\n  * "
                  + "\n\n  * ".join(problems)
                  + "\n\nFix the line(s) above in the CONFIG block at the top of the file, save, and run again.")
-    if TEST_EXTERNES:  # test mode: ReccoBeats + Last.fm only, zero Spotify calls
+    if TEST_EXTERNES:   # test mode: ReccoBeats + Last.fm only, zero Spotify calls
         load_cache()
         run_external_test()
         return
@@ -1467,14 +1529,14 @@ def main(apply_mode=False):
 
     # per-playlist ID sets to test membership
     ids_in = {name: {t["id"] for t in lst} for name, lst in contents.items()}
-    actions = []  # every proposed change, tagged confident/review - see ACTION CLASSIFICATION above
+    actions = []    # every proposed change, tagged confident/review - see ACTION CLASSIFICATION above
 
     # =====================================================================
     # 1) SUGGESTED ADDITIONS for the source playlist
     # =====================================================================
     rows_add = []
     to_create_bpm = defaultdict(list)       # {bucket: [tracks]} -> BPM playlists to create
-    to_create_genre = defaultdict(list)     # {genre: [tracks]}  -> Genre playlists to create
+    to_create_genre = defaultdict(list)     # {genre: [tracks]} -> Genre playlists to create
     unknown_genre_tags = defaultdict(list)  # {raw genre/tag: [tracks]} unmapped
     if not apply_mode:
         print("=" * 100)
@@ -1484,8 +1546,8 @@ def main(apply_mode=False):
         tempo = tempos.get(t["id"])
         bucket = bpm_bucket(tempo)
         genre, raw_genres, genre_src, close_vote = resolve_genre(t, artist_genres)
-        aid = _addable_id(t)             # None only for an unmatched local file: cannot be added via the API
-        local_tier = _local_override(t)  # a shaky local match makes the WHOLE track uncertain
+        aid = _addable_id(t)            # None only for an unmatched local file: cannot be added via the API
+        local_tier = _local_override(t) # a shaky local match makes the WHOLE track uncertain
 
         # --- BPM target (console shows only the measured tempo; the full action lives in the CSV)
         if tempo is None:
@@ -1496,17 +1558,15 @@ def main(apply_mode=False):
             bpm_action = f"already in '{pname}'" if already else f"ADD to '{pname}'"
             if aid and not already:
                 tier, group = local_tier or classify_bpm(t, measured_locally)
-                actions.append({"type": "add_track", "kind": "bpm", "tier": tier, "group": group,
-                                "track_id": aid, "track_name": t["name"], "track_artist": t["artists"],
-                                "target": pname, "needs_create": False, "unlock_id": None})
+                actions.append({"type": "add_track", "kind": "bpm", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
+                                "track_artist": t["artists"], "target": pname, "needs_create": False, "unlock_id": None})
         else:
             bpm_action = f"CREATE playlist '{bucket} bpm' then add this track"
             to_create_bpm[bucket].append(f"{t['name']} - {t['artists']}")
             if aid:
                 tier, group = local_tier or classify_bpm(t, measured_locally)
-                actions.append({"type": "add_track", "kind": "bpm", "tier": tier, "group": group,
-                                "track_id": aid, "track_name": t["name"], "track_artist": t["artists"],
-                                "target": f"{bucket} bpm", "needs_create": True, "unlock_id": f"bpm_{bucket}"})
+                actions.append({"type": "add_track", "kind": "bpm", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
+                                "track_artist": t["artists"], "target": f"{bucket} bpm", "needs_create": True, "unlock_id": f"bpm_{bucket}"})
 
         alts = []
         if SHOW_HALF_DOUBLE_TEMPO and tempo:
@@ -1526,18 +1586,16 @@ def main(apply_mode=False):
             g_tok = ("=" if already else "+") + pname
             if aid and not already:
                 tier, group = local_tier or classify_genre(genre_src, close_vote)
-                actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group,
-                                "track_id": aid, "track_name": t["name"], "track_artist": t["artists"],
-                                "target": pname, "needs_create": False, "unlock_id": None})
+                actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
+                                "track_artist": t["artists"], "target": pname, "needs_create": False, "unlock_id": None})
         else:
             genre_action = f"CREATE playlist '{genre}' then add this track [source: {genre_src}]"
             g_tok = f"NEW {genre}"
             to_create_genre[genre].append(f"{t['name']} - {t['artists']}")
             if aid:
                 tier, group = local_tier or classify_genre(genre_src, close_vote)
-                actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group,
-                                "track_id": aid, "track_name": t["name"], "track_artist": t["artists"],
-                                "target": genre, "needs_create": True, "unlock_id": f"genre_{_slug(genre)}"})
+                actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
+                                "track_artist": t["artists"], "target": genre, "needs_create": True, "unlock_id": f"genre_{_slug(genre)}"})
 
         loc = (" [LOCAL~Spotify]" if t.get("matched") else " [LOCAL]") if t.get("local") else (" [LIKED]" if t.get("liked") else "")
         tag = raw_genres[0] if raw_genres else ""
@@ -1579,22 +1637,21 @@ def main(apply_mode=False):
             rows_misplaced.append([info["name"], t["name"], t["artists"], tempo, dest_name, "BPM"])
             # a move needs a real destination, and a real (non-synthetic) uri to remove from the source
             if dest and not t.get("local"):
-                actions.append({"type": "move_track", "kind": "bpm", "tier": "confident", "group": None,
-                                "track_id": t["id"], "track_name": t["name"], "track_artist": t["artists"],
-                                "from_playlist_id": info["id"], "from_playlist_name": info["name"], "from_position": pos,
-                                "to_playlist_name": dest["name"]})
+                actions.append({"type": "move_track", "kind": "bpm", "tier": "confident", "group": None, "track_id": t["id"],
+                                "track_name": t["name"], "track_artist": t["artists"], "from_playlist_id": info["id"],
+                                "from_playlist_name": info["name"], "from_position": pos, "to_playlist_name": dest["name"]})
 
     skipped_artist_flags = 0
     for gname, info in sorted(genre_playlists.items()):
         if gname in MISPLACED_GENRE_EXEMPT:
-            continue  # deliberate catch-all playlists are not audited
+            continue    # deliberate catch-all playlists are not audited
         for pos, t in enumerate(contents[info["name"]]):
             genre, raw, src, _close = resolve_genre(t, artist_genres)
             if genre and genre != gname:
                 if any({gname, genre} <= pair for pair in NEIGHBOR_GENRES):
-                    continue  # sibling playlists: the border is a curation choice, not a misplacement
+                    continue    # sibling playlists: the border is a curation choice, not a misplacement
                 if MISPLACED_GENRE_TRACK_ONLY and "track" not in src:
-                    skipped_artist_flags += 1  # artist-level tag = too weak a signal to flag
+                    skipped_artist_flags += 1   # artist-level tag = too weak a signal to flag
                     continue
                 if not apply_mode:
                     print(f"- [{gname}] {t['name']} - {t['artists']}: estimated genre '{genre}' via {src} ({'; '.join(raw[:3])}) -> double-check")
@@ -1621,12 +1678,12 @@ def main(apply_mode=False):
         print("=" * 100)
     for pname, lst in contents.items():
         pid = playlist_id_by_name.get(pname)
-        orig_id_count, orig_name_count = defaultdict(int), defaultdict(int)  # never mutated: true totals
+        orig_id_count, orig_name_count = defaultdict(int), defaultdict(int) # never mutated: true totals
         for t in lst:
             orig_id_count[t["id"]] += 1
             orig_name_count[(t["name"].lower(), t["artists"].lower())] += 1
-        seen_id, seen_name = dict(orig_id_count), dict(orig_name_count)  # mutated copy: gates the "show once" print
-        kept_id, kept_name = set(), set()  # the FIRST occurrence of each duplicate is kept, never removed
+        seen_id, seen_name = dict(orig_id_count), dict(orig_name_count) # mutated copy: gates the "show once" print
+        kept_id, kept_name = set(), set()   # the FIRST occurrence of each duplicate is kept, never removed
         for pos, t in enumerate(lst):
             key = (t["name"].lower(), t["artists"].lower())
             is_id_dup, is_name_dup = orig_id_count[t["id"]] > 1, orig_name_count[key] > 1
@@ -1637,24 +1694,23 @@ def main(apply_mode=False):
                 if not apply_mode:
                     print(f"- [{pname}] {t['name']} - {t['artists']}: {reason} -> DELETE the duplicate")
                 rows_dupes.append([pname, t["name"], t["artists"], reason])
-                seen_id[t["id"]], seen_name[key] = 1, 1  # show only once
+                seen_id[t["id"]], seen_name[key] = 1, 1 # show only once
+
             # action: keep the first occurrence encountered, flag every later one for removal
             if t.get("local") or not pid:
-                continue  # no reliable uri to remove a local file's exact playlist entry with
+                continue    # no reliable uri to remove a local file's exact playlist entry with
             if is_id_dup:
                 if t["id"] not in kept_id:
                     kept_id.add(t["id"])
                 else:
-                    actions.append({"type": "remove_duplicate", "tier": "confident", "group": None,
-                                    "playlist_id": pid, "playlist_name": pname, "position": pos,
-                                    "track_id": t["id"], "track_name": t["name"], "track_artist": t["artists"]})
+                    actions.append({"type": "remove_duplicate", "tier": "confident", "group": None, "playlist_id": pid, "playlist_name": pname,
+                                    "position": pos, "track_id": t["id"], "track_name": t["name"], "track_artist": t["artists"]})
             elif is_name_dup:
                 if key not in kept_name:
                     kept_name.add(key)
                 else:
-                    actions.append({"type": "remove_duplicate", "tier": "review", "group": "dup_variant",
-                                    "playlist_id": pid, "playlist_name": pname, "position": pos,
-                                    "track_id": t["id"], "track_name": t["name"], "track_artist": t["artists"]})
+                    actions.append({"type": "remove_duplicate", "tier": "review", "group": "dup_variant", "playlist_id": pid, "playlist_name": pname,
+                                    "position": pos, "track_id": t["id"], "track_name": t["name"], "track_artist": t["artists"]})
     if not rows_dupes and not apply_mode:
         print("No duplicates detected.")
 
@@ -1705,12 +1761,18 @@ def main(apply_mode=False):
     write_csv("2_misplaced.csv", ["Current playlist", "Title", "Artists", "Measurement", "Suggested destination", "Type"], rows_misplaced)
     write_csv("3_duplicates.csv", ["Playlist", "Title", "Artists", "Reason"], rows_dupes)
     write_csv("4_playlists_to_create.csv", ["Playlist to create", "Type", "Pending track"], rows_create)
-    export_report(actions, to_create_bpm, to_create_genre, os.path.join(OUTPUT_DIR, "report.json"))
+    report_path = os.path.join(OUTPUT_DIR, "report.json")
+    export_report(actions, to_create_bpm, to_create_genre, report_path)
+    open_review_interface(report_path)
 
     save_cache(force=True)
     print("\nDone. Nothing was modified on your account (dry-run).")
-    print("Next: open review_interface.html, load report.json, decide, export decisions.json,")
-    print("      then run this script again with --apply to write the approved changes to Spotify.")
+    if AUTO_OPEN_REVIEW:
+        print("Next: in the review page that just opened, decide and export your decisions, then run")
+        print("      this script again with --apply to write the approved changes to Spotify.")
+    else:
+        print("Next: open review_interface.html, load report.json, decide, export decisions.json,")
+        print("      then run this script again with --apply to write the approved changes to Spotify.")
 
 if __name__ == "__main__":
     main(apply_mode="--apply" in sys.argv[1:])

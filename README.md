@@ -1,21 +1,23 @@
 # Spotify Playlist Sorter
 
 A Python script that analyses your Spotify playlists and tells you, for every track, which BPM playlist
-and which genre playlist it should go to — without ever changing anything on your account.
+and which genre playlist it should go to.
 
-It's a **dry-run analysis tool**: it only ever reads your library (`playlist-read-private`,
-`playlist-read-collaborative`, and optionally `user-library-read` for Liked Songs) and produces a report.
-No track is added, removed, or moved anywhere.
+A plain run is **read-only**: it only ever reads your library (`playlist-read-private`,
+`playlist-read-collaborative`, and optionally `user-library-read` for Liked Songs) and produces a report —
+no track is added, removed, or moved. Actually changing your library is a deliberate second step
+(`--apply`, see "Applying the changes" below), gated behind your review and a single explicit confirmation.
 
 ## What it produces
 
-A console report plus four CSV files in `rapport_spotify/`:
+A console report, four CSV files, and `report.json` (for the review interface — see "Applying the
+changes" below), all in `rapport_spotify/`:
 
 | # | Report | Content |
 |---|--------|---------|
 | 1 | `1_suggested_additions.csv` | For each track in your source playlist: which "XX bpm" playlist and which genre playlist it belongs to, and whether it's already there |
 | 2 | `2_misplaced.csv` | Tracks already in a playlist whose measured BPM or detected genre disagrees with it |
-| 3 | `3_duplicates.csv` | Same track appearing more than once in a playlist (exact match or same name+artist) |
+| 3 | `3_duplicates.csv` | Same track appearing more than once in a playlist (exact match or same name+artist) — checked in every BPM/genre playlist, your source playlist, and (optionally) every other playlist you own |
 | 4 | `4_playlists_to_create.csv` | BPM or genre playlists that don't exist yet, with the tracks waiting for them |
 
 Every genre verdict states its source (`Last.fm (track)`, `Last.fm (artist)`, `iTunes (track)`, `Spotify
@@ -79,6 +81,8 @@ it — it won't send you into a confusing Spotify login error.
 | `MATCH_LOCAL_FILES` | Search the Spotify catalog for each local file's equivalent, so it becomes fully actionable |
 | `MAX_LOCAL_MATCH_PER_RUN` | Spotify allows roughly 750 calls/day; `0` = no cap, do it all in one run |
 | `INCLUDE_LIKED_SONGS` | Also sort your Liked Songs library (adds the `user-library-read` scope) |
+| `CHECK_ALL_PLAYLISTS_FOR_DUPLICATES` | Also check every OTHER playlist you own (not just BPM/genre ones) for duplicates |
+| `AUTO_OPEN_REVIEW` | Open `review_interface.html` automatically at the end of a run, report already loaded |
 | `ANALYZE_DEEZER_PREVIEWS` | Last-resort BPM: download 30 s previews and measure the tempo locally |
 | `TEST_EXTERNES` | Paste track links to test ReccoBeats/Last.fm without touching your Spotify quota |
 
@@ -101,7 +105,11 @@ the local-file matching if enabled). Every later run is fast — usually seconds
 almost everything comes from the cache.
 
 If the daily Spotify quota runs out mid-run, the script tells you exactly when Spotify says to retry, saves
-its progress, and exits cleanly. Just run it again after that time; it picks up where it left off.
+its progress, and exits cleanly. Just run it again after that time; it picks up where it left off. A short
+rate-limit (Spotify asking you to wait a few seconds, not the daily wall) is retried automatically and never
+interrupts the run. Liked Songs, the all-playlist duplicate scan, and local-file matching are all resilient
+to running out of quota mid-way: they stop cleanly with whatever they got, and the rest of the analysis
+(BPM/genre, both non-Spotify) still completes and still produces a full report.
 
 ## How genre classification works
 
@@ -136,10 +144,15 @@ A plain run is always read-only. To actually change your library, there are thre
    `rapport_spotify/report.json`: every proposed change, split into **confident** (safe measurements/matches,
    no call needed) and **needs your call**, grouped by *why* it's uncertain (genre guessed from the artist
    only, a fuzzy local-file match, a close genre vote, a possible real duplicate, etc.).
-2. **Review** — open `review_interface.html` (double-click, no server, no install) and click "Load
-   report.json". Approve or skip each group in bulk, with the option to except a few individual tracks.
-   Decide which not-yet-existing playlists (140 bpm, SoundTrack...) are worth creating. Click "Export
-   decisions" — this downloads `decisions.json` to your Downloads folder.
+2. **Review** — `review_interface.html` opens automatically with this run's report already loaded (set
+   `AUTO_OPEN_REVIEW = False` in the CONFIG to disable this and load it manually instead: double-click
+   `review_interface.html`, no server, no install, and click "Load report.json"). Every group shows its
+   **full** track list — not just a preview — in a scrollable, filterable, sortable panel (by title, artist,
+   or destination). Checkboxes are literal: checked means that track will be included, full stop. "Approve
+   all" / "Leave out" just check or uncheck everything in the group at once; you can still flip any
+   individual track afterwards. A small VU-meter on each group fills up live as you include its tracks, so
+   you can see your progress at a glance. Decide which not-yet-existing playlists (140 bpm, SoundTrack...)
+   are worth creating. Click "Export decisions" — this downloads `decisions.json` to your Downloads folder.
 3. **Apply** — `python SpotifySortPlaylist.py --apply`. It re-checks your library fresh (fast, thanks to
    the cache), applies your decisions, and shows a **full preview** of every playlist to create, track to
    add, move, or remove — grouped and counted. Nothing is written until you type `yes` at the single
@@ -159,8 +172,6 @@ already-applied changes are recognised as done and skipped, nothing is ever doub
   playlist, and it never touches a track that isn't part of an action you approved.
 - Local files without a matched catalog equivalent still can't be acted on directly (the API has no way to
   add/move a raw MP3) — they stay a manual, drag-and-drop job.
-- The review interface only ships a handful of sample tracks per group (to stay lightweight); a group
-  decision applies to *every* track in it, with exceptions limited to the tracks you can see and un-tick.
 - This write path is thoroughly unit-tested against a simulated Spotify client, but — unlike the read-only
   analysis, exercised for real over many runs — it has not been exercised against the live API. For your
   first `--apply`, consider approving something small first (the exact-ID duplicates are the lowest-risk
