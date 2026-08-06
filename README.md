@@ -48,7 +48,8 @@ scratch, which can take an hour or more on a large library.
 
 - Python 3.9+
 - A Spotify app: create one at <https://developer.spotify.com/dashboard>, with Redirect URI
-  `http://127.0.0.1:8888/callback`
+  `http://127.0.0.1:8888/callback`. A plain run only ever asks for read access; `--apply` additionally asks
+  for permission to create/edit playlists the first time you use it (your browser reopens once for that).
 - A free Last.fm API key (optional but recommended): <https://www.last.fm/api/account/create>
 - Third-party Python packages (`spotipy`, `requests`, and optionally `truststore` / `librosa`) install
   **automatically** on first run — nothing to install by hand.
@@ -143,7 +144,11 @@ A plain run is always read-only. To actually change your library, there are thre
 1. **Analyse** — `python SpotifySortPlaylist.py` as usual. Besides the CSVs, it now also writes
    `rapport_spotify/report.json`: every proposed change, split into **confident** (safe measurements/matches,
    no call needed) and **needs your call**, grouped by *why* it's uncertain (genre guessed from the artist
-   only, a fuzzy local-file match, a close genre vote, a possible real duplicate, etc.).
+   only, a fuzzy local-file match, a close genre vote, a possible real duplicate, a BPM move that a second,
+   independent lookup didn't confirm, etc.). A track a playlist already correctly holds is never moved on
+   a single source's word alone — before trusting a BPM-based move, a second lookup has to agree, or it
+   goes to "needs your call" instead. That verdict is cached, so it stays the same between this report and
+   the later `--apply`, even if that second lookup would answer differently by then.
 2. **Review** — `review_interface.html` opens automatically with this run's report already loaded (set
    `AUTO_OPEN_REVIEW = False` in the CONFIG to disable this and load it manually instead: double-click
    `review_interface.html`, no server, no install, and click "Load report.json"). Every group shows its
@@ -187,5 +192,13 @@ already-applied changes are recognised as done and skipped, nothing is ever doub
 - **`BadStatusLine` / flaky network errors** — usually a corporate proxy hiccup; the script retries
   automatically. If it persists, check `PROXY_URL` and try refreshing a page in your browser first (some
   proxies need an active session).
+- **`Insufficient client scope` on `--apply`** — a saved login from before you first used `--apply` doesn't
+  cover playlist creation/editing yet. The script now detects this itself and deletes the stale login so
+  Spotify re-asks (your browser reopens) — if it still happens, delete `.spotify_token_cache` by hand and
+  run again.
+- **Deezer (or ReccoBeats) consistently returns 0 results** — usually a proxy/certificate issue rather than
+  Deezer itself being down: test a single well-known query (e.g. "Bohemian Rhapsody") outside the main
+  script with your `PROXY_URL` and `truststore` set up the same way, to see the raw response or the real
+  underlying error.
 - **Quota exhausted** — the exit message tells you exactly when to retry (from Spotify's own `Retry-After`
   value when available). Just wait and re-run; nothing is lost.

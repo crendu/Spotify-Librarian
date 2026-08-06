@@ -173,7 +173,9 @@ ITUNES_URL = "https://itunes.apple.com/search"
 LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
 RECCOBEATS_URL = "https://api.reccobeats.com/v1/audio-features"
 LASTFM_MIN_TAG_COUNT = 10   # ignore overly marginal Last.fm tags
-SCOPES = "playlist-read-private playlist-read-collaborative" + (" user-library-read" if INCLUDE_LIKED_SONGS else "")    # read-only in every case
+
+READ_SCOPES = "playlist-read-private playlist-read-collaborative" + (" user-library-read" if INCLUDE_LIKED_SONGS else "")   # a plain run only ever needs this
+WRITE_SCOPES = "playlist-modify-private playlist-modify-public" # only requested for --apply
 
 # ======================================================================================================================
 # END OF CONFIG - nothing to modify below
@@ -209,7 +211,7 @@ _http = requests.Session()
 # ======================================================================================================================
 # DISK CACHE - protects the Spotify quota and speeds up re-runs
 # ======================================================================================================================
-_cache = {"playlists": {}, "tempos": {}, "lastfm": {}, "localmatch": {}}
+_cache = {"playlists": {}, "tempos": {}, "lastfm": {}, "localmatch": {}, "bpm_corroboration": {}}
 _cache_dirty = 0
 
 def load_cache():
@@ -261,8 +263,9 @@ def quota_exit(context, retry_after=None):
         when = f"Spotify says: retry in {h} h {mn:02d} min (around {time.strftime('%H:%M', resume)}{day})."
     else:
         when = "Spotify did not say when; usually ~24 h after the first refusal."
-    sys.exit(f"\nERROR: Spotify quota exhausted ({context}). {when}\n"
-             f"Cache saved: the next run only fetches what is missing.")
+    print(f"\nERROR: Spotify quota exhausted ({context}). {when}\n"
+          f"Cache saved: the next run only fetches what is missing.", file=sys.stderr)
+    sys.exit(1)
 
 def spotify_call(fn, context, attempts=4):
     """Runs one Spotify call, retrying on network hiccups AND on a SHORT-lived 429 (Retry-After <= 30s - Spotify's burst
@@ -322,14 +325,29 @@ def validate_config(require_spotify=True):
             f"         or leave it empty (\"\") to run without Last.fm.")
     return problems
 
-def get_client() -> spotipy.Spotify:
+def get_client(apply_mode=False) -> spotipy.Spotify:
     problems = validate_config(require_spotify=True)
     if problems:
         sys.exit("The script cannot start: something in the CONFIG block needs fixing.\n\n  * "
                  + "\n\n  * ".join(problems)
                  + "\n\nFix the line(s) above in the CONFIG block at the top of the file, save, and run again.")
+    scopes = READ_SCOPES + (" " + WRITE_SCOPES if apply_mode else "")
     # status_retries=0: on a 429 (quota), spotipy raises immediately instead of sleeping for hours
-    auth = SpotifyOAuth(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, redirect_uri=SPOTIFY_REDIRECT_URI, scope=SCOPES, open_browser=True, cache_path=".spotify_token_cache")
+    auth = SpotifyOAuth(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, redirect_uri=SPOTIFY_REDIRECT_URI, scope=scopes, open_browser=True, cache_path=".spotify_token_cache")
+
+    # A saved login that doesn't cover what THIS run needs (typically: you logged in for a plain analysis, then ran --apply for the first time).
+    cached = auth.cache_handler.get_cached_token()
+    if cached:
+        missing = set(scopes.split()) - set((cached.get("scope") or "").split())
+        if missing:
+            print(f"! Your saved Spotify login is missing permission(s) this run needs: "
+                  f"{', '.join(sorted(missing))}\n  Removing the old login so Spotify asks for them "
+                  f"(your browser will reopen) ...")
+            try:
+                os.remove(auth.cache_handler.cache_path)
+            except OSError as e:
+                print(f"  ! could not remove {auth.cache_handler.cache_path} ({e}) - delete it by hand "
+                      f"if the browser does not reopen.", file=sys.stderr)
     return spotipy.Spotify(auth_manager=auth, retries=3, status_retries=0, requests_timeout=15)
 
 def fetch_all(sp, first_page, context="pagination"):
@@ -535,7 +553,9 @@ def get_tempos(sp, tracks_by_id):
 
     # --- ReccoBeats (by Spotify ID, ~40 per batch); local files have no ID
     rb_ids = [tid for tid in missing if _SPOTIFY_ID_RE.fullmatch(tid)]
-    found = 0
+    found, next_print = 0, 100
+    if rb_ids:
+        print(f"  * ReccoBeats : {len(rb_ids)} to try (batches of 40, ~0.5 s each)")
     for i in range(0, len(rb_ids), 40):
         content = _reccobeats_get("audio-features", rb_ids[i:i + 40])
         if content is None:
@@ -550,7 +570,14 @@ def get_tempos(sp, tracks_by_id):
                 _cache["tempos"][sid] = tempos[sid]
                 _cache_dirty += 1
                 found += 1
-        save_cache()
+
+        checked = min(i + 40, len(rb_ids))
+        if checked >= next_print or checked == len(rb_ids):
+            print(f"      ... {checked}/{len(rb_ids)} checked, {found} found")
+            save_cache(force=True)
+            next_print += 100
+        else:
+            save_cache()
         time.sleep(0.5) # politeness
     save_cache(force=True)
     missing = [tid for tid, v in tempos.items() if v is None]
@@ -560,20 +587,25 @@ def get_tempos(sp, tracks_by_id):
     # --- Deezer (by artist+title: catches remaster/edit versions and local files)
     found = 0
     if missing and USE_DEEZER_BPM_FALLBACK:
-        print(f"  * Deezer     : {len(missing)} to try (artist+title search, ~0.6 s each)")
-        for n, tid in enumerate(missing, 1):
-            t = tracks_by_id[tid]
-            bpm = get_deezer_bpm(t["artists"], t["name"], tid)
-            if bpm:
-                tempos[tid] = bpm
-                _cache["tempos"][tid] = bpm
-                _cache_dirty += 1
-                found += 1
-            if _deezer_failures >= 5:
-                break
-            if n % 50 == 0:
-                print(f"      ... {n}/{len(missing)} checked, {found} found")
-                save_cache(force=True)
+        if not _deezer_sanity_check():
+            print(f"  * Deezer     : skipped - even a known-good test query ('Bohemian Rhapsody') came back")
+            print(f"      empty, so Deezer is unreachable or misbehaving right now rather than genuinely")
+            print(f"      not knowing {len(missing)} tracks. Re-run later, or check your network/proxy.")
+        else:
+            print(f"  * Deezer     : {len(missing)} to try (artist+title search, ~0.6 s each)")
+            for n, tid in enumerate(missing, 1):
+                t = tracks_by_id[tid]
+                bpm = get_deezer_bpm(t["artists"], t["name"], tid)
+                if bpm:
+                    tempos[tid] = bpm
+                    _cache["tempos"][tid] = bpm
+                    _cache_dirty += 1
+                    found += 1
+                if _deezer_failures >= 5:
+                    break
+                if n % 50 == 0:
+                    print(f"      ... {n}/{len(missing)} checked, {found} found")
+                    save_cache(force=True)
         left = sum(1 for v in tempos.values() if v is None)
         stage("Deezer", found, left, "stopped by circuit breaker" if _deezer_failures >= 5 else "")
 
@@ -613,6 +645,22 @@ _TITLE_SUFFIX_RE = re.compile(r"\s+-\s+")
 def _clean_title(title):
     """Drops version suffixes (" - Radio Edit", " - 2011 Remastered Version"...) before a name-based search."""
     return _TITLE_SUFFIX_RE.split(title)[0].strip()
+
+def _deezer_sanity_check():
+    """One known-good query before spending time on the whole batch (see get_tempos): if even a
+    universally-known track returns nothing, Deezer is unreachable or misbehaving right now, not
+    every track in the batch being genuinely unknown at once."""
+    try:
+        r = _http.get(f"{DEEZER_URL}/search", params={"q": 'artist:"Queen" track:"Bohemian Rhapsody"', "limit": 1}, timeout=15)
+        r.raise_for_status()
+        return bool(r.json().get("data"))
+    except requests.exceptions.SSLError as e:
+        print(f"      (reason: SSL certificate error - {e.__class__.__name__}. Likely your proxy's SSL "
+              f"inspection cert isn't trusted; check USE_SYSTEM_CERTS and that 'truststore' installed OK.)")
+        return False
+    except (requests.RequestException, ValueError, KeyError) as e:
+        print(f"      (reason: {e.__class__.__name__}: {e})")
+        return False
 
 def get_deezer_bpm(artist, title, tid=None):
     """BPM via the public Deezer API: search the track by name, read its bpm. Works for local files and remastered versions.
@@ -915,6 +963,8 @@ REVIEW_GROUPS = {
                         "A second opinion on your own curation, not a verdict - your placement may well be the right one."),
     "bpm_measured":     ("BPM measured from an audio preview, not looked up",
                         "No catalog had this tempo on file, so it was estimated by analysing a short preview."),
+    "bpm_disagreement": ("BPM sources disagree on where this belongs",
+                        "A second, independent lookup did not confirm the tempo that suggested moving this track."),
 }
 
 def _addable_id(t):
@@ -928,6 +978,21 @@ def _local_override(t):
     if t.get("local") and t.get("matched") and t.get("match_mode", 1) != 1:
         return "review", "local_fuzzy_match"
     return None
+
+def _corroborate_bpm_move(tid, cached_tempo, artist, title):
+    """Before trusting a BPM-misplaced move, cross-checks the cached tempo against an INDEPENDENT second opinion.
+    A single bad reading from one source should never be enough to yank an already-placed track out of its playlist."""
+    global _cache_dirty
+    if tid in _cache["bpm_corroboration"]:
+        return _cache["bpm_corroboration"][tid]
+    second = get_deezer_bpm(artist, title)
+    if not second:
+        return True  # nothing to contradict with yet - proceed on the original source's word, retry next run
+    b1, b2 = bpm_bucket(cached_tempo), bpm_bucket(second)
+    agree = b1 == b2 or bpm_bucket(cached_tempo / 2) == b2 or bpm_bucket(cached_tempo * 2) == b2
+    _cache["bpm_corroboration"][tid] = agree
+    _cache_dirty += 1
+    return agree
 
 def classify_bpm(t, measured_locally):
     """(tier, group) for a BPM-based add/move. Confident unless the tempo was measured, not looked up."""
@@ -1516,7 +1581,7 @@ def main(apply_mode=False):
         run_external_test()
         return
     load_cache()
-    sp = get_client()
+    sp = get_client(apply_mode)
     me = spotify_call(sp.current_user, "authentication")
     print(f"Logged in as: {me['display_name']} ({me['id']})")
     if apply_mode:
@@ -1637,7 +1702,9 @@ def main(apply_mode=False):
             rows_misplaced.append([info["name"], t["name"], t["artists"], tempo, dest_name, "BPM"])
             # a move needs a real destination, and a real (non-synthetic) uri to remove from the source
             if dest and not t.get("local"):
-                actions.append({"type": "move_track", "kind": "bpm", "tier": "confident", "group": None, "track_id": t["id"],
+                corroborated = _corroborate_bpm_move(t["id"], tempo, t["artists"], t["name"])
+                tier, group = ("confident", None) if corroborated else ("review", "bpm_disagreement")
+                actions.append({"type": "move_track", "kind": "bpm", "tier": tier, "group": group, "track_id": t["id"],
                                 "track_name": t["name"], "track_artist": t["artists"], "from_playlist_id": info["id"],
                                 "from_playlist_name": info["name"], "from_position": pos, "to_playlist_name": dest["name"]})
 
