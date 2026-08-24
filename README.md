@@ -23,6 +23,9 @@ changes" below), all in `rapport_spotify/`:
 Every genre verdict states its source (`Last.fm (track)`, `Last.fm (artist)`, `iTunes (track)`, `Spotify
 (artist)`) so you can judge how much to trust it.
 
+Artist-follow suggestions (`AUTO_FOLLOW_ARTISTS`) live only in `report.json` and the review interface, not
+in any of the four CSVs above.
+
 ## Why this is more complicated than it sounds
 
 Spotify closed its own BPM endpoint (`/audio-features`) to every app created after November 2024, and a
@@ -50,6 +53,8 @@ scratch, which can take an hour or more on a large library.
 - A Spotify app: create one at <https://developer.spotify.com/dashboard>, with Redirect URI
   `http://127.0.0.1:8888/callback`. A plain run only ever asks for read access; `--apply` additionally asks
   for permission to create/edit playlists the first time you use it (your browser reopens once for that).
+  If `AUTO_FOLLOW_ARTISTS` is on, the same pattern applies to following artists: read access for a plain
+  run (to know who you already follow), write access only for `--apply`.
 - A free Last.fm API key (optional but recommended): <https://www.last.fm/api/account/create>
 - Third-party Python packages (`spotipy`, `requests`, and optionally `truststore` / `librosa`) install
   **automatically** on first run — nothing to install by hand.
@@ -84,6 +89,7 @@ it — it won't send you into a confusing Spotify login error.
 | `INCLUDE_LIKED_SONGS` | Also sort your Liked Songs library (adds the `user-library-read` scope) |
 | `CHECK_ALL_PLAYLISTS_FOR_DUPLICATES` | Also check every OTHER playlist you own (not just BPM/genre ones) for duplicates |
 | `AUTO_OPEN_REVIEW` | Open `review_interface.html` automatically at the end of a run, report already loaded |
+| `AUTO_FOLLOW_ARTISTS` | Also suggest (via the review interface) following every artist in your library you don't follow yet |
 | `ANALYZE_DEEZER_PREVIEWS` | Last-resort BPM: download 30 s previews and measure the tempo locally |
 | `TEST_EXTERNES` | Paste track links to test ReccoBeats/Last.fm without touching your Spotify quota |
 
@@ -112,6 +118,12 @@ interrupts the run. Liked Songs, the all-playlist duplicate scan, and local-file
 to running out of quota mid-way: they stop cleanly with whatever they got, and the rest of the analysis
 (BPM/genre, both non-Spotify) still completes and still produces a full report.
 
+Every BPM-based add or move is cross-checked against a second, independent source before being trusted (see
+"Applying the changes" below) — a real cost the first time a track is seen (one extra Deezer lookup), but
+free on every run after, since the verdict is cached per track. On a large, never-before-analysed library
+expect this to noticeably add to that first-run hour; it has no effect on later runs beyond genuinely new
+tracks.
+
 ## How genre classification works
 
 Each raw tag (from Last.fm, iTunes, etc.) casts **one vote** for a category:
@@ -128,6 +140,13 @@ ambiguous tag can no longer overrule a clear majority.
 If you spot a genre you disagree with, the cheapest fix is almost always an `EXPLICIT_GENRE_MAP` entry —
 it takes effect on every future run at no extra API cost.
 
+Two categories exist specifically as deliberate, un-audited catch-alls (like Pop): **Instrumental** (tag
+`instrumental` — a performance style, not a genre, so it only wins when nothing more specific also matched)
+and **Inclassable**, which is different from the rest: it's not voted for by any tag. A track lands there
+only when Last.fm (track and artist), iTunes, *and* Spotify's own artist genres all came back with nothing
+usable — rather than silently vanishing with no actionable trace, it gets a real, reviewable add-to-playlist
+action, so you can place it by ear at your leisure instead of it being lost in a CSV footnote.
+
 ## Local files (imported MP3s)
 
 Local files have no Spotify ID, so the official BPM/audio endpoints can't see them — but their name and
@@ -137,6 +156,17 @@ per file (normal fields, swapped fields for inverted MP3 tags, then free text) �
 fully actionable for a future "apply changes" step. Matches and misses are both cached, so this search is
 only ever paid once per file.
 
+## Artist auto-follow (optional)
+
+With `AUTO_FOLLOW_ARTISTS` on, the analysis also looks across your whole library (source playlist, Liked
+Songs, and every other playlist checked) for artists you don't already follow, and adds them to the review
+interface as a normal group — approve individually or in bulk, same as everything else. Nothing is followed
+automatically; it's suggested like any other change and only takes effect through `--apply`.
+
+This uses the unified library endpoints Spotify introduced in February 2026
+(`GET`/`PUT /me/library` with `spotify:artist:{id}` URIs) — the older, entity-specific follow endpoints this
+kind of feature would normally use were removed that same month for apps in Development Mode.
+
 ## Applying the changes (phase 2)
 
 A plain run is always read-only. To actually change your library, there are three steps:
@@ -144,11 +174,12 @@ A plain run is always read-only. To actually change your library, there are thre
 1. **Analyse** — `python SpotifySortPlaylist.py` as usual. Besides the CSVs, it now also writes
    `rapport_spotify/report.json`: every proposed change, split into **confident** (safe measurements/matches,
    no call needed) and **needs your call**, grouped by *why* it's uncertain (genre guessed from the artist
-   only, a fuzzy local-file match, a close genre vote, a possible real duplicate, a BPM move that a second,
-   independent lookup didn't confirm, etc.). A track a playlist already correctly holds is never moved on
-   a single source's word alone — before trusting a BPM-based move, a second lookup has to agree, or it
-   goes to "needs your call" instead. That verdict is cached, so it stays the same between this report and
-   the later `--apply`, even if that second lookup would answer differently by then.
+   only, a fuzzy local-file match, a close genre vote, a possible real duplicate, a BPM that a second,
+   independent lookup didn't confirm, etc.). No BPM-based add or move — including the very first time a
+   track is filed into a bucket — is ever trusted on a single source's word alone: a second, independent
+   lookup (Deezer, by name) has to agree, or it goes to "needs your call" instead. That verdict is cached
+   per track, so it stays the same between this report and the later `--apply` even if that second lookup
+   would answer differently by then — and it's only ever paid once per track, not once per run.
 2. **Review** — `review_interface.html` opens automatically with this run's report already loaded (set
    `AUTO_OPEN_REVIEW = False` in the CONFIG to disable this and load it manually instead: double-click
    `review_interface.html`, no server, no install, and click "Load report.json"). Every group shows its
@@ -202,3 +233,8 @@ already-applied changes are recognised as done and skipped, nothing is ever doub
   underlying error.
 - **Quota exhausted** — the exit message tells you exactly when to retry (from Spotify's own `Retry-After`
   value when available). Just wait and re-run; nothing is lost.
+- **Artist-follow calls fail even though `AUTO_FOLLOW_ARTISTS` is on** — Spotify removed the old
+  entity-specific follow endpoints for Development Mode apps in February 2026; this script already targets
+  their replacement (`/me/library`) directly rather than through spotipy's now-outdated built-in methods.
+  If this ever breaks again, check Spotify's Web API changelog for further endpoint changes before assuming
+  it's a bug here.

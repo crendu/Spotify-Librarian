@@ -94,6 +94,7 @@ LOCAL_MATCH_PACE = 0.8                      # Seconds between two searches (Spot
 AUTO_OPEN_REVIEW = True                     # Open review_interface.html in your browser at the end of a run, already loaded with this run's report
 
 ANALYZE_DEEZER_PREVIEWS = False             # Measure missing BPMs from 30 s previews (slow; installs librosa)
+AUTO_FOLLOW_ARTISTS = False                 # Suggest following (via the review interface) every artist in your analysed library you don't follow yet
 CHECK_ALL_PLAYLISTS_FOR_DUPLICATES = False  # Also checks every OTHER playlist YOU OWN (never ones you merely follow, like Discover Weekly)
 INCLUDE_LIKED_SONGS = False                 # Also sort your "Liked Songs" library (adds ~1 call per 50 liked)
 
@@ -123,7 +124,7 @@ GENRE_RULES = [
     ("Rap",        ["rap", "hip hop", "hip-hop", "hiphop", "trap", "drill", "grime", "boom bap", "phonk"]),
     ("Soul",       ["soul", "r&b", "rnb", "r&b/soul", "funk", "motown", "gospel", "doo wop"]),
     ("Electro",    ["electro", "edm", "house", "techno", "tekno", "hardtek", "tribe", "trance", "dubstep", "drum and bass",
-                    "dnb", "jungle", "bass music", "synthwave", "big room", "uk garage", "future garage", "speed garage",
+                    "dnb", "jungle", "bass music", "future bass", "synthwave", "big room", "uk garage", "future garage", "speed garage",
                     "hardcore techno", "happy hardcore", "gabber", "frenchcore", "electro swing", "drill and bass", "lofi",
                     "lo-fi", "ambient", "chillout", "downtempo", "trip hop", "trip-hop", "idm", "psytrance", "hardstyle"]),
     ("Dance",      ["dance pop", "dance", "disco", "eurodance", "hyperpop"]),
@@ -132,11 +133,13 @@ GENRE_RULES = [
                     "bande originale", "film music", "theme song", "composer"]),
     ("Française",  ["french", "chanson", "variete francaise", "variété française", "francoton"]),
     ("Pop",        ["pop", "indie", "singer-songwriter", "singer/songwriter", "synthpop", "britpop", "folk", "country", "americana", "baroque pop", "chamber pop"]),  # catch-all, keep last
+    ("Instrumental", ["instrumental"]),  # performance style, not a musical style - deliberately last
 ]
 
 # A tag written here goes straight to its category, before any keyword logic (perfect for the report's "unmapped tags" list,
 # or to overrule a keyword decision).
 EXPLICIT_GENRE_MAP = {
+    "spain": "Latina",
     # "ska punk": "Reggae",
 }
 
@@ -153,7 +156,7 @@ NEIGHBOR_GENRES = [
     {"Soul", "Dance"},
 ]
 # Playlists never audited for misplaced genres ("Pop" is your all-era hits catch-all: auditing it is noise).
-MISPLACED_GENRE_EXEMPT = ["Pop"]
+MISPLACED_GENRE_EXEMPT = ["Pop", "Instrumental"]
 # Only flag a track as misplaced when the verdict comes from the TRACK's own tags (artist tags are too weak).
 MISPLACED_GENRE_TRACK_ONLY = True
 
@@ -174,8 +177,11 @@ LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
 RECCOBEATS_URL = "https://api.reccobeats.com/v1/audio-features"
 LASTFM_MIN_TAG_COUNT = 10   # ignore overly marginal Last.fm tags
 
-READ_SCOPES = "playlist-read-private playlist-read-collaborative" + (" user-library-read" if INCLUDE_LIKED_SONGS else "")   # a plain run only ever needs this
-WRITE_SCOPES = "playlist-modify-private playlist-modify-public" # only requested for --apply
+READ_SCOPES = ("playlist-read-private playlist-read-collaborative"
+            + (" user-library-read" if INCLUDE_LIKED_SONGS else "")
+            + (" user-follow-read" if AUTO_FOLLOW_ARTISTS else ""))     # a plain run only ever needs this
+WRITE_SCOPES = ("playlist-modify-private playlist-modify-public"
+            + (" user-follow-modify" if AUTO_FOLLOW_ARTISTS else ""))   # only requested for --apply
 
 # ======================================================================================================================
 # END OF CONFIG - nothing to modify below
@@ -252,8 +258,8 @@ def save_cache(force=False):
         print(f"! cache not saved: {e}", file=sys.stderr)
 
 def quota_exit(context, retry_after=None):
-    """Saves the cache then stops the script, telling WHEN Spotify will accept requests again (taken from the Retry-After
-    header of the 429 answer when Spotify provides it)."""
+    """Saves the cache then stops the current step, telling WHEN Spotify will accept requests again (taken from the
+    Retry-After header of the 429 answer when Spotify provides it)."""
     save_cache(force=True)
     if retry_after:
         secs = int(retry_after)
@@ -276,13 +282,18 @@ def spotify_call(fn, context, attempts=4):
             return fn()
         except spotipy.exceptions.SpotifyException as e:
             if e.http_status == 429:
-                retry_after = (getattr(e, "headers", None) or {}).get("Retry-After")
+                headers = getattr(e, "headers", None) or {}
+                retry_after = headers.get("Retry-After")
                 short = int(retry_after) if (retry_after or "").isdigit() else None
                 if short is not None and short <= 30 and attempt < attempts:
                     print(f"  ! Spotify rate-limit on {context} -> pausing {short}s (attempt {attempt}/{attempts - 1}, "
                           f"looks like a short burst, not the daily quota)", file=sys.stderr)
                     time.sleep(short)
                     continue
+                if not retry_after:
+                    # Proof, not a guess: shows whether Spotify truly sent nothing, or something got lost reading it.
+                    print(f"  (no Retry-After on this 429 - full headers for reference: "
+                          f"{dict(headers) if headers else 'no headers object at all'})", file=sys.stderr)
                 quota_exit(context, retry_after)
             raise
         except requests.exceptions.RequestException as e:
@@ -334,8 +345,8 @@ def get_client(apply_mode=False) -> spotipy.Spotify:
     scopes = READ_SCOPES + (" " + WRITE_SCOPES if apply_mode else "")
     # status_retries=0: on a 429 (quota), spotipy raises immediately instead of sleeping for hours
     auth = SpotifyOAuth(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, redirect_uri=SPOTIFY_REDIRECT_URI, scope=scopes, open_browser=True, cache_path=".spotify_token_cache")
-
-    # A saved login that doesn't cover what THIS run needs (typically: you logged in for a plain analysis, then ran --apply for the first time).
+    # A saved login that doesn't cover what THIS run needs (typically: you logged in for a plain analysis, then ran --apply for the first time)
+    # would otherwise be reused as-is and fail deep into the run with a raw "Insufficient client scope" 403.
     cached = auth.cache_handler.get_cached_token()
     if cached:
         missing = set(scopes.split()) - set((cached.get("scope") or "").split())
@@ -381,8 +392,9 @@ def _parse_playlist_items(items, skipped=None):
             if skipped is not None: skipped["non-track (episode...)"] = skipped.get("non-track (episode...)", 0) + 1
             continue
         tracks.append({"id": t["id"], "name": t["name"],
-                       "artists": ", ".join(a["name"] for a in t.get("artists", [])),
-                       "artist_ids": [a["id"] for a in t.get("artists", []) if a.get("id")]})
+                        "artists": ", ".join(a["name"] for a in t.get("artists", [])),
+                        "artist_ids": [a["id"] for a in t.get("artists", []) if a.get("id")],
+                        "artist_pairs": [(a["id"], a["name"]) for a in t.get("artists", []) if a.get("id") and a.get("name")]})
     return tracks
 
 def get_playlist_tracks(sp, playlist_id, snapshot_id=None):
@@ -571,7 +583,7 @@ def get_tempos(sp, tracks_by_id):
                 _cache_dirty += 1
                 found += 1
 
-        checked = min(i + 40, len(rb_ids))
+        checked = min(i + 40, len(rb_ids))  # A threshold, not "checked % 100 == 0": batches step by 40, so a plain modulo would silently print every 200 instead of every ~100.
         if checked >= next_print or checked == len(rb_ids):
             print(f"      ... {checked}/{len(rb_ids)} checked, {found} found")
             save_cache(force=True)
@@ -647,9 +659,9 @@ def _clean_title(title):
     return _TITLE_SUFFIX_RE.split(title)[0].strip()
 
 def _deezer_sanity_check():
-    """One known-good query before spending time on the whole batch (see get_tempos): if even a
-    universally-known track returns nothing, Deezer is unreachable or misbehaving right now, not
-    every track in the batch being genuinely unknown at once."""
+    """One known-good query before spending time on the whole batch (see get_tempos): if even a universally-known track returns nothing,
+    Deezer is unreachable or misbehaving right now, not every track in the batch being genuinely unknown at once.
+    Prints the real reason (SSL/cert issue, timeout, proxy refusal...) once, instead of a generic "unreachable" that hides what actually failed."""
     try:
         r = _http.get(f"{DEEZER_URL}/search", params={"q": 'artist:"Queen" track:"Bohemian Rhapsody"', "limit": 1}, timeout=15)
         r.raise_for_status()
@@ -949,22 +961,26 @@ def resolve_genre(track, artist_genres):
 
 # label, one-line reason shown to the person reviewing - keep both in plain, specific language.
 REVIEW_GROUPS = {
-    "genre_artist_tag": ("Genre guessed from the artist, not the track",
-                        "Last.fm had nothing for the track itself, so the verdict comes from the artist's overall style."),
-    "genre_itunes":     ("Genre from iTunes (coarse match)",
-                        "Last.fm knew nothing about this track or its artist; iTunes's broad category is what's left."),
-    "genre_close_vote": ("Genre call was close",
-                        "Two categories were nearly tied on the track's own tags."),
-    "local_fuzzy_match":("Local file matched by a loose search",
-                        "The title/artist tags in the file looked unusual, so the catalog match is less certain."),
-    "dup_variant":      ("Same title & artist, different file",
-                        "Could be a genuinely different version (live, remaster) worth keeping separately."),
-    "misplaced_genre":  ("Genre disagrees with where you put it",
-                        "A second opinion on your own curation, not a verdict - your placement may well be the right one."),
-    "bpm_measured":     ("BPM measured from an audio preview, not looked up",
-                        "No catalog had this tempo on file, so it was estimated by analysing a short preview."),
-    "bpm_disagreement": ("BPM sources disagree on where this belongs",
-                        "A second, independent lookup did not confirm the tempo that suggested moving this track."),
+    "bpm_disagreement":     ("BPM sources disagree on where this belongs",
+                            "A second, independent lookup did not confirm the tempo that suggested moving this track."),
+    "bpm_measured":         ("BPM measured from an audio preview, not looked up",
+                            "No catalog had this tempo on file, so it was estimated by analysing a short preview."),
+    "dup_variant":          ("Same title & artist, different file",
+                            "Could be a genuinely different version (live, remaster) worth keeping separately."),
+    "genre_artist_tag":     ("Genre guessed from the artist, not the track",
+                            "Last.fm had nothing for the track itself, so the verdict comes from the artist's overall style."),
+    "genre_close_vote":     ("Genre call was close",
+                            "Two categories were nearly tied on the track's own tags."),
+    "genre_itunes":         ("Genre from iTunes (coarse match)",
+                            "Last.fm knew nothing about this track or its artist; iTunes's broad category is what's left."),
+    "genre_unclassifiable": ("Genre truly unknown - every source came up empty",
+                            "Last.fm (track and artist), iTunes, and Spotify all had nothing usable - parked in 'Inclassable' for you to place by ear, rather than silently dropped."),
+    "local_fuzzy_match":    ("Local file matched by a loose search",
+                            "The title/artist tags in the file looked unusual, so the catalog match is less certain."),
+    "misplaced_genre":      ("Genre disagrees with where you put it",
+                            "A second opinion on your own curation, not a verdict - your placement may well be the right one."),
+    "new_artist_follow":    ("Artist in your library you don't follow yet",
+                            "Following helps Spotify's recommendations and keeps you notified of new releases."),
 }
 
 def _addable_id(t):
@@ -979,9 +995,13 @@ def _local_override(t):
         return "review", "local_fuzzy_match"
     return None
 
-def _corroborate_bpm_move(tid, cached_tempo, artist, title):
-    """Before trusting a BPM-misplaced move, cross-checks the cached tempo against an INDEPENDENT second opinion.
-    A single bad reading from one source should never be enough to yank an already-placed track out of its playlist."""
+def _corroborate_bpm(tid, cached_tempo, artist, title):
+    """Before trusting ANY BPM-based action, cross-checks the cached tempo (from whichever source produced it first - ReccoBeats usually)
+    against an INDEPENDENT second opinion (Deezer, by name).
+    A single bad reading from one source should never be enough to file (or move) a track with silent confidence.
+
+    Returns True when there's no contradiction (agreement, half/double, or no second opinion yet),
+    False when a genuine disagreement means this action should go to a human instead of happening automatically."""
     global _cache_dirty
     if tid in _cache["bpm_corroboration"]:
         return _cache["bpm_corroboration"][tid]
@@ -994,9 +1014,13 @@ def _corroborate_bpm_move(tid, cached_tempo, artist, title):
     _cache_dirty += 1
     return agree
 
-def classify_bpm(t, measured_locally):
-    """(tier, group) for a BPM-based add/move. Confident unless the tempo was measured, not looked up."""
-    return ("review", "bpm_measured") if t["id"] in measured_locally else ("confident", None)
+def classify_bpm(t, tempo, measured_locally):
+    """(tier, group) for a BPM-based add. Confident unless the tempo was measured (not looked up), or a second, independent source doesn't confirm it."""
+    if t["id"] in measured_locally:
+        return "review", "bpm_measured"
+    if not _corroborate_bpm(t["id"], tempo, t["artists"], t["name"]):
+        return "review", "bpm_disagreement"
+    return "confident", None
 
 def classify_genre(genre_src, close_vote):
     """(tier, group) for a genre-based add/move, from the precision of its source."""
@@ -1010,6 +1034,30 @@ def classify_genre(genre_src, close_vote):
 
 def _slug(label):
     return re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+
+def get_unfollowed_artists(sp, artist_ids):
+    """Returns the subset of artist_ids not already followed."""
+    ids = list(artist_ids)
+    unfollowed = []
+    for i in range(0, len(ids), 40):
+        chunk = ids[i:i + 40]
+        uris = ",".join(f"spotify:artist:{aid}" for aid in chunk)
+        result = spotify_call(lambda uris=uris: sp._get("me/library/contains", uris=uris), "checking followed artists")
+        unfollowed.extend(aid for aid, already in zip(chunk, result) if not already)
+    return unfollowed
+
+def follow_artists(sp, artist_ids):
+    """Follows the given artists via PUT /me/library (spotify:artist:{id} URIs). Chunked at 40, the endpoint's documented maximum."""
+    for i in range(0, len(artist_ids), 40):
+        chunk = artist_ids[i:i + 40]
+        uris = [f"spotify:artist:{aid}" for aid in chunk]
+        spotify_call(lambda uris=uris: sp._put("me/library", payload={"uris": uris}), "following artists")
+
+def _track_label(t):
+    """A human-readable "Title - Artist" label. Falls back to the raw ID when Spotify has neither. Never printed as a confusing blank line."""
+    if t.get("name") or t.get("artists"):
+        return f"{t['name']} - {t['artists']}"
+    return f"(unnamed track, id {t.get('id', '?')})"
 
 def open_review_interface(report_path):
     """Opens review_interface.html in your browser with THIS run's report already loaded - no manual
@@ -1068,8 +1116,9 @@ def export_report(actions, to_create_bpm, to_create_genre, path):
     for gid, acts in by_group.items():
         label, why = REVIEW_GROUPS[gid]
         tracks = [{"id": a["track_id"], "title": a["track_name"], "artist": a["track_artist"],
-                  "detail": f"-> {a['target']}" if a["type"] == "add_track" else
-                            f"-> {a.get('to_playlist_name', 'remove')}"} for a in acts[:MAX_TRACKS_PER_GROUP_IN_REPORT]]
+                  "detail": "Follow" if a["type"] == "follow_artist" else
+                            (f"-> {a['target']}" if a["type"] == "add_track" else
+                             f"-> {a.get('to_playlist_name', 'remove')}")} for a in acts[:MAX_TRACKS_PER_GROUP_IN_REPORT]]
         review_groups.append({"id": gid, "label": label, "why": why, "total_count": len(acts), "tracks": tracks})
     review_groups.sort(key=lambda g: -g["total_count"])
     with open(path, "w", encoding="utf-8") as f:
@@ -1500,6 +1549,7 @@ def apply_actions(sp, actions, to_create_bpm, to_create_genre, playlist_id_by_na
     adds = [a for a in final if a["type"] == "add_track"]
     moves = [a for a in final if a["type"] == "move_track"]
     removes = [a for a in final if a["type"] == "remove_duplicate"]
+    follows = [a for a in final if a["type"] == "follow_artist"]
 
     print("=" * 100)
     print("APPLY PREVIEW - nothing has been sent to Spotify yet")
@@ -1521,12 +1571,18 @@ def apply_actions(sp, actions, to_create_bpm, to_create_genre, playlist_id_by_na
         print(f"\nDuplicate tracks to remove ({len(removes)}):")
         for pname, n in sorted(Counter(a["playlist_name"] for a in removes).items(), key=lambda kv: -kv[1]):
             print(f"  - {n:>5}   from '{pname}'")
+    if follows:
+        print(f"\nArtists to follow ({len(follows)}):")
+        for a in follows[:15]:
+            print(f"  - {a['track_name']}")
+        if len(follows) > 15:
+            print(f"  ... and {len(follows) - 15} more")
 
-    total = len(adds) + len(moves) + len(removes) + len(to_create)
+    total = len(adds) + len(moves) + len(removes) + len(to_create) + len(follows)
     if total == 0:
         print("\nNothing to apply - either everything is already sorted, or decisions.json approved nothing.")
         return
-    print(f"\n{len(adds)} add(s), {len(moves)} move(s), {len(removes)} removal(s), {len(to_create)} playlist(s) to create.")
+    print(f"\n{len(adds)} add(s), {len(moves)} move(s), {len(removes)} removal(s), {len(follows)} follow(s), {len(to_create)} playlist(s) to create.")
     if input("\nType 'yes' to write these changes to your Spotify account, anything else to cancel: ").strip().lower() != "yes":
         print("Cancelled - nothing was changed.")
         return
@@ -1567,6 +1623,10 @@ def apply_actions(sp, actions, to_create_bpm, to_create_genre, playlist_id_by_na
             items = [{"uri": tid, "positions": [pos]} for pos, tid, _ in entries[i:i + 100]]
             spotify_call(lambda pid=pid, items=items: sp.playlist_remove_specific_occurrences_of_items(pid, items), f"remove from {pname}")
         print(f"  Removed {len(entries)} track(s) from '{pname}'")
+
+    if follows:
+        follow_artists(sp, [a["track_id"] for a in follows])
+        print(f"  Followed {len(follows)} artist(s)")
     print("\nDone. Your Spotify account has been updated.")
 
 def main(apply_mode=False):
@@ -1597,6 +1657,28 @@ def main(apply_mode=False):
     actions = []    # every proposed change, tagged confident/review - see ACTION CLASSIFICATION above
 
     # =====================================================================
+    # 0) ARTISTS YOU DON'T FOLLOW YET (opt-in, AUTO_FOLLOW_ARTISTS)
+    # =====================================================================
+    if AUTO_FOLLOW_ARTISTS:
+        all_lib_tracks = {t["id"]: t for t in source_tracks}
+        for lst in contents.values():
+            for t in lst:
+                all_lib_tracks.setdefault(t["id"], t)
+        artist_map = {}  # artist_id -> [name, track_count]
+        for t in all_lib_tracks.values():
+            for aid, aname in t.get("artist_pairs", []):
+                entry = artist_map.setdefault(aid, [aname, 0])
+                entry[1] += 1
+        if artist_map:
+            unfollowed = get_unfollowed_artists(sp, list(artist_map))
+            for aid in unfollowed:
+                name, count = artist_map[aid]
+                actions.append({"type": "follow_artist", "tier": "review", "group": "new_artist_follow", "track_id": aid, "track_name": name,
+                                "track_artist": f"{count} track{'s' if count != 1 else ''} in your library", "needs_create": False, "unlock_id": None})
+            if not apply_mode:
+                print(f"Artists you don't follow yet: {len(unfollowed)} (out of {len(artist_map)} in your library)\n")
+
+    # =====================================================================
     # 1) SUGGESTED ADDITIONS for the source playlist
     # =====================================================================
     rows_add = []
@@ -1622,14 +1704,14 @@ def main(apply_mode=False):
             already = t["id"] in ids_in.get(pname, set())
             bpm_action = f"already in '{pname}'" if already else f"ADD to '{pname}'"
             if aid and not already:
-                tier, group = local_tier or classify_bpm(t, measured_locally)
+                tier, group = local_tier or classify_bpm(t, tempo, measured_locally)
                 actions.append({"type": "add_track", "kind": "bpm", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
                                 "track_artist": t["artists"], "target": pname, "needs_create": False, "unlock_id": None})
         else:
             bpm_action = f"CREATE playlist '{bucket} bpm' then add this track"
-            to_create_bpm[bucket].append(f"{t['name']} - {t['artists']}")
+            to_create_bpm[bucket].append(_track_label(t))
             if aid:
-                tier, group = local_tier or classify_bpm(t, measured_locally)
+                tier, group = local_tier or classify_bpm(t, tempo, measured_locally)
                 actions.append({"type": "add_track", "kind": "bpm", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
                                 "track_artist": t["artists"], "target": f"{bucket} bpm", "needs_create": True, "unlock_id": f"bpm_{bucket}"})
 
@@ -1643,6 +1725,23 @@ def main(apply_mode=False):
             genre_action, g_tok = f"unidentified genre ({'; '.join(raw_genres[:3]) or 'no Spotify or Last.fm info'})", "genre ?"
             for g in raw_genres:
                 unknown_genre_tags[g].append(f"{t['name']} - {t['artists']}")
+
+            # Every source in the cascade came up empty - park it in a real "Inclassable" playlist instead of the track vanishing with no action at all.
+            if aid:
+                INCLASSABLE = "Inclassable"
+                tier, group = local_tier or ("review", "genre_unclassifiable")
+                if INCLASSABLE in genre_playlists:
+                    pname = genre_playlists[INCLASSABLE]["name"]
+                    already = t["id"] in ids_in.get(pname, set())
+                    if not already:
+                        actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid,
+                                        "track_name": t["name"], "track_artist": t["artists"], "target": pname,
+                                        "needs_create": False, "unlock_id": None})
+                else:
+                    to_create_genre[INCLASSABLE].append(_track_label(t))
+                    actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid,
+                                    "track_name": t["name"], "track_artist": t["artists"], "target": INCLASSABLE,
+                                    "needs_create": True, "unlock_id": f"genre_{_slug(INCLASSABLE)}"})
         elif genre in genre_playlists:
             pname = genre_playlists[genre]["name"]
             already = t["id"] in ids_in.get(pname, set())
@@ -1656,7 +1755,7 @@ def main(apply_mode=False):
         else:
             genre_action = f"CREATE playlist '{genre}' then add this track [source: {genre_src}]"
             g_tok = f"NEW {genre}"
-            to_create_genre[genre].append(f"{t['name']} - {t['artists']}")
+            to_create_genre[genre].append(_track_label(t))
             if aid:
                 tier, group = local_tier or classify_genre(genre_src, close_vote)
                 actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
@@ -1667,7 +1766,7 @@ def main(apply_mode=False):
         if not apply_mode:
             # console line: only what is known, except "(? bpm)" on an otherwise-complete line, so a missing tempo does
             # not go unnoticed. A fully unresolved track stays bare (CSV has the rest).
-            parts = [f"- {t['name']} - {t['artists']}{loc}"]
+            parts = [f"- {_track_label(t)}{loc}"]
             if tempo:
                 parts.append(f"({tempo:g} bpm" + (f" or {' or '.join(alts)}" if alts else "") + ")")
             elif genre is not None:
@@ -1702,7 +1801,7 @@ def main(apply_mode=False):
             rows_misplaced.append([info["name"], t["name"], t["artists"], tempo, dest_name, "BPM"])
             # a move needs a real destination, and a real (non-synthetic) uri to remove from the source
             if dest and not t.get("local"):
-                corroborated = _corroborate_bpm_move(t["id"], tempo, t["artists"], t["name"])
+                corroborated = _corroborate_bpm(t["id"], tempo, t["artists"], t["name"])
                 tier, group = ("confident", None) if corroborated else ("review", "bpm_disagreement")
                 actions.append({"type": "move_track", "kind": "bpm", "tier": tier, "group": group, "track_id": t["id"],
                                 "track_name": t["name"], "track_artist": t["artists"], "from_playlist_id": info["id"],
