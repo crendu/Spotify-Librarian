@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sort Review — Spotify Playlist Sorter</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%226%22%20fill%3D%22%2314120F%22/%3E%3Crect%20x%3D%226%22%20y%3D%2218%22%20width%3D%225%22%20height%3D%229%22%20rx%3D%221%22%20fill%3D%22%237FA66B%22/%3E%3Crect%20x%3D%2213.5%22%20y%3D%229%22%20width%3D%225%22%20height%3D%2218%22%20rx%3D%221%22%20fill%3D%22%23D9A441%22/%3E%3Crect%20x%3D%2221%22%20y%3D%2215%22%20width%3D%225%22%20height%3D%2212%22%20rx%3D%221%22%20fill%3D%22%237FA66B%22/%3E%3C/svg%3E">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
@@ -101,6 +102,34 @@ section{ margin-bottom:36px; }
   background:var(--panel); border:1px solid var(--hairline); border-radius:4px; margin-bottom:10px;
   overflow:hidden;
 }
+.section-hint{ color:var(--text-dim); font-size:12px; margin:-6px 0 12px; line-height:1.5; }
+.unmapped-row{
+  display:flex; align-items:center; gap:14px; padding:10px 14px; background:var(--panel);
+  border:1px solid var(--hairline); border-radius:4px; margin-bottom:6px;
+}
+.unmapped-row .tag{ font-family:var(--mono); font-size:13px; color:var(--review); min-width:220px; }
+.unmapped-row .meta{ flex:1; color:var(--text-dim); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.unmapped-row select{
+  background:var(--panel-raised); border:1px solid var(--hairline); color:var(--text); border-radius:3px;
+  padding:6px 8px; font-size:12px; font-family:var(--sans); flex-shrink:0;
+}
+.unmapped-row select.pinned{ border-color:var(--review); color:var(--review); }
+.unmapped-track-block{
+  background:var(--panel); border:1px solid var(--hairline); border-radius:4px; margin-bottom:8px;
+  padding:10px 14px;
+}
+.unmapped-track-name{ font-weight:500; font-size:13px; margin-bottom:8px; color:var(--text); }
+.unmapped-tag-row{
+  display:flex; align-items:center; gap:14px; padding:6px 0; border-top:1px solid #2a261f;
+}
+.unmapped-tag-row:first-of-type{ border-top:none; padding-top:0; }
+.unmapped-tag-row .tag{ font-family:var(--mono); font-size:13px; color:var(--review); min-width:220px; }
+.unmapped-tag-row .meta{ flex:1; color:var(--text-faint); font-size:11px; }
+.unmapped-tag-row select{
+  background:var(--panel-raised); border:1px solid var(--hairline); color:var(--text); border-radius:3px;
+  padding:6px 8px; font-size:12px; font-family:var(--sans); flex-shrink:0;
+}
+.unmapped-tag-row select.pinned{ border-color:var(--review); color:var(--review); }
 .group-head{ padding:14px 16px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
 .group-head .meta{ flex:1; min-width:200px; }
 .group-head .reason{ font-size:14px; font-weight:500; }
@@ -213,6 +242,14 @@ footer{
   <section>
     <h2>Needs your call</h2>
     <div id="groupsWrap"></div>
+  </section>
+
+  <section id="unmappedSection" style="display:none">
+    <h2>Tags that matched nothing</h2>
+    <p class="section-hint">Last.fm/iTunes tags that never fit one of your categories. Pin one to a
+      category and it takes effect from your next analysis on - leave it on "Don't map" if it's not
+      really a genre (nationality, mood, popularity tier...).</p>
+    <div id="unmappedWrap"></div>
   </section>
 
 </div>
@@ -359,6 +396,8 @@ function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
+const tagMapping = {};  // tag -> category the user picked, or absent/"" for "Don't map"
+
 function init(d){
   data = d;
   document.getElementById("confidentCount").textContent = d.confident_count.toLocaleString();
@@ -368,7 +407,55 @@ function init(d){
   });
   renderUnlocks();
   renderGroups();
+  renderUnmappedTags();
   recompute();
+}
+
+function renderUnmappedTags(){
+  const section = document.getElementById("unmappedSection");
+  const wrap = document.getElementById("unmappedWrap");
+  const tracks = data.unmapped_tracks || [];
+  const categories = data.categories || [];
+  wrap.innerHTML = "";
+  if(!tracks.length || !categories.length){ section.style.display = "none"; return; }
+  section.style.display = "";
+
+  const selectsByTag = {};  // tag -> [<select> elements] - kept in sync so the same tag never shows two different picks
+  tracks.forEach(tr=>{
+    const block = document.createElement("div");
+    block.className = "unmapped-track-block";
+    const nameEl = document.createElement("div"); nameEl.className = "unmapped-track-name"; nameEl.textContent = tr.track;
+    block.appendChild(nameEl);
+    tr.tags.forEach(t=>{
+      const row = document.createElement("div");
+      row.className = "unmapped-tag-row";
+      const tagEl = document.createElement("span"); tagEl.className = "tag"; tagEl.textContent = `'${t.tag}'`;
+      const metaEl = document.createElement("span"); metaEl.className = "meta";
+      metaEl.textContent = `${t.count} track${t.count===1?"":"s"} total with this tag`;
+      const select = document.createElement("select");
+      const blank = document.createElement("option"); blank.value = ""; blank.textContent = "Don't map";
+      select.appendChild(blank);
+      categories.forEach(cat=>{
+        const opt = document.createElement("option"); opt.value = cat; opt.textContent = cat;
+        select.appendChild(opt);
+      });
+      select.value = tagMapping[t.tag] || "";
+      select.classList.toggle("pinned", !!select.value);
+      select.onchange = () => {
+        if(select.value) tagMapping[t.tag] = select.value; else delete tagMapping[t.tag];
+        // The same tag can appear under several tracks - keep every occurrence showing the same pick,
+        // since it is really one underlying decision (an EXPLICIT_GENRE_MAP entry), not one per track.
+        (selectsByTag[t.tag] || []).forEach(other=>{
+          other.value = select.value;
+          other.classList.toggle("pinned", !!select.value);
+        });
+      };
+      (selectsByTag[t.tag] = selectsByTag[t.tag] || []).push(select);
+      row.append(tagEl, metaEl, select);
+      block.appendChild(row);
+    });
+    wrap.appendChild(block);
+  });
 }
 
 function renderUnlocks(){
@@ -554,7 +641,7 @@ function buildDecisionsObject(){
     if(checkedIds.length >= uncheckedIds.length) review[g.id] = { default: "approved", exceptions: uncheckedIds };
     else review[g.id] = { default: "skipped", exceptions: checkedIds };
   });
-  return {generated_at: new Date().toISOString(), unlocks, review};
+  return {generated_at: new Date().toISOString(), unlocks, review, tag_mappings: {...tagMapping}};
 }
 
 function exportDecisions(){

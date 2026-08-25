@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Analysis — Spotify Playlist Sorter</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%226%22%20fill%3D%22%2314120F%22/%3E%3Crect%20x%3D%226%22%20y%3D%2218%22%20width%3D%225%22%20height%3D%229%22%20rx%3D%221%22%20fill%3D%22%237FA66B%22/%3E%3Crect%20x%3D%2213.5%22%20y%3D%229%22%20width%3D%225%22%20height%3D%2218%22%20rx%3D%221%22%20fill%3D%22%23D9A441%22/%3E%3Crect%20x%3D%2221%22%20y%3D%2215%22%20width%3D%225%22%20height%3D%2212%22%20rx%3D%221%22%20fill%3D%22%237FA66B%22/%3E%3C/svg%3E">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root{
+  --void:#14120F; --panel:#1C1914; --panel-raised:#231F19; --hairline:#39342C;
+  --text:#EDE7DA; --text-dim:#9C9384; --text-faint:#5E584C;
+  --ready:#7FA66B; --ready-dim:#3A4630;
+  --review:#D9A441; --review-dim:#4A3D22;
+  --skip:#8A8578; --skip-dim:#332F27;
+  --reject:#B5533C; --reject-dim:#452922;
+  --focus:#D9A441;
+  --mono: 'IBM Plex Mono', ui-monospace, 'Consolas', monospace;
+  --sans: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
+}
+*{ box-sizing:border-box; }
+body{
+  background:var(--void); color:var(--text); font-family:var(--sans); margin:0; padding:32px 24px 80px;
+  min-height:100vh;
+}
+.wrap{ max-width:900px; margin:0 auto; }
+header{ margin-bottom:20px; }
+h1{ font-size:20px; font-weight:700; margin:0 0 4px; letter-spacing:-0.01em; }
+.subtitle{ color:var(--text-dim); font-size:13px; }
+.toolbar{ display:flex; align-items:center; gap:10px; margin:16px 0 24px; flex-wrap:wrap; }
+.btn{
+  background:var(--panel-raised); border:1px solid var(--hairline); color:var(--text); border-radius:4px;
+  padding:8px 14px; font-size:13px; font-family:var(--sans); cursor:pointer;
+}
+.btn:hover{ border-color:var(--text-dim); }
+.btn.primary{ background:var(--review-dim); border-color:var(--review); color:var(--review); }
+#fileInput{ display:none; }
+.source-label{ color:var(--text-faint); font-size:12px; font-family:var(--mono); }
+
+.tabs{ display:flex; gap:2px; border-bottom:1px solid var(--hairline); margin-bottom:24px; }
+.tab{
+  background:none; border:none; color:var(--text-dim); font-family:var(--sans); font-size:13px;
+  padding:10px 18px; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px;
+}
+.tab.active{ color:var(--text); border-bottom-color:var(--review); }
+.tab:hover:not(.active){ color:var(--text); }
+.panel{ display:none; }
+.panel.active{ display:block; }
+
+.card{
+  background:var(--panel); border:1px solid var(--hairline); border-radius:4px; padding:18px 20px;
+  margin-bottom:16px;
+}
+.side-by-side{ display:flex; gap:16px; }
+.side-by-side .card{ flex:1; min-width:0; }
+@media (max-width: 640px){ .side-by-side{ flex-direction:column; } }
+.card h2{ font-size:14px; font-weight:500; margin:0 0 4px; }
+.card .hint{ color:var(--text-faint); font-size:11px; margin-bottom:14px; }
+.stat-row{ display:flex; gap:28px; flex-wrap:wrap; margin-bottom:6px; }
+.stat{ }
+.stat .num{ font-family:var(--mono); font-size:22px; color:var(--review); font-weight:600; }
+.stat .lbl{ font-size:11px; color:var(--text-dim); margin-top:2px; }
+
+.bar-row{ display:flex; align-items:center; gap:10px; padding:4px 0; font-size:12px; }
+.bar-label{ width:110px; flex-shrink:0; color:var(--text-dim); text-align:right; font-family:var(--mono); }
+.bar-track{ flex:1; background:var(--panel-raised); border-radius:3px; height:16px; overflow:hidden; }
+.bar-fill{ height:100%; border-radius:3px; }
+.bar-value{ width:60px; flex-shrink:0; color:var(--text-faint); font-family:var(--mono); font-size:11px; }
+
+.year-col{ display:flex; flex-direction:column; align-items:center; gap:6px; flex:1; min-width:0; }
+.year-stack{
+  width:100%; max-width:56px; height:220px; display:flex; flex-direction:column-reverse;
+  border-radius:3px; overflow:hidden; background:var(--panel-raised);
+}
+.year-seg{ width:100%; }
+.year-label{ font-family:var(--mono); font-size:11px; color:var(--text-dim); }
+.year-count{ font-family:var(--mono); font-size:10px; color:var(--text-faint); }
+.years-row{ display:flex; gap:10px; align-items:flex-end; overflow-x:auto; padding-bottom:6px; }
+
+.legend{ display:flex; flex-wrap:wrap; gap:10px 16px; margin-top:14px; }
+.legend-item{ display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-dim); }
+.legend-swatch{ width:10px; height:10px; border-radius:2px; flex-shrink:0; }
+
+.empty{ color:var(--text-faint); font-size:13px; padding:20px 0; text-align:center; }
+.th-tree{ font-family:var(--sans); font-size:12px; fill:var(--text); }
+.ts-tree{ font-family:var(--sans); font-size:10px; fill:var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Music analysis</h1>
+  <div class="subtitle">Genre, tempo, and artist trends across your library</div>
+</header>
+
+<div class="toolbar">
+  <button class="btn primary" onclick="document.getElementById('fileInput').click()">Load analysis.json</button>
+  <input type="file" id="fileInput" accept=".json">
+  <span class="source-label" id="sourceLabel">Showing demo data</span>
+</div>
+
+<div class="tabs">
+  <button class="tab active" data-tab="overview">Overview</button>
+  <button class="tab" data-tab="yearly">By year</button>
+</div>
+
+<div class="panel active" id="panel-overview">
+  <div class="card">
+    <h2>Library snapshot</h2>
+    <div class="hint" id="overviewHint"></div>
+    <div class="stat-row">
+      <div class="stat"><div class="num" id="statTracks">0</div><div class="lbl">tracks analysed</div></div>
+      <div class="stat"><div class="num" id="statAvgBpm">–</div><div class="lbl">average bpm</div></div>
+      <div class="stat"><div class="num" id="statMedianBpm">–</div><div class="lbl">median bpm</div></div>
+      <div class="stat"><div class="num" id="statGenres">0</div><div class="lbl">genres represented</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Top artists</h2>
+    <div class="hint">By number of tracks in your analysed library</div>
+    <div id="artistBars"></div>
+  </div>
+  <div class="side-by-side">
+    <div class="card">
+      <h2>Genre distribution</h2>
+      <div class="hint">Share of your analysed library, by category</div>
+      <div id="genreBars"></div>
+    </div>
+    <div class="card">
+      <h2>Tempo distribution</h2>
+      <div class="hint">Tracks per 10 bpm bucket</div>
+      <div id="bpmBars"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Genre &amp; sub-genre map</h2>
+    <div class="hint">Category size = real track count in your library. Thin branches = keywords the script recognises for that category (not a real per-keyword count)</div>
+    <svg id="genreTree" width="100%" viewBox="0 0 900 900" role="img"><title>Genre and sub-genre map</title><desc>Categories sized by real track count, with recognised sub-genre keywords branching off each</desc></svg>
+  </div>
+</div>
+
+<div class="panel" id="panel-yearly">
+  <div class="card" id="yearlyCard">
+    <h2>Genre mix by year</h2>
+    <div class="hint">From your own "top songs of the year" playlists — each bar is one year, stacked by genre share</div>
+    <div class="years-row" id="yearsRow"></div>
+    <div class="legend" id="yearlyLegend"></div>
+  </div>
+  <div class="card">
+    <h2>Average tempo by year</h2>
+    <div class="hint" id="yearlyBpmHint"></div>
+    <div id="yearlyBpmBars"></div>
+  </div>
+</div>
+
+</div>
+<script>
+const GENRE_COLORS = {
+  "Rock":"#C75450", "Electro":"#4FB0C6", "Rap":"#9B7ED8", "Pop":"#D9A441", "Soul":"#E08E45",
+  "Dance":"#5FA8D3", "Française":"#7FA66B", "Reggae":"#6FBF73", "Latina":"#E0607E", "Jazz":"#C9A227",
+  "Classique":"#B5A8D6", "SoundTrack":"#8A8578", "Instrumental":"#A9A9A9", "Inclassable":"#5E584C"
+};
+function colorFor(g){ return GENRE_COLORS[g] || "#5E584C"; }
+
+const DEMO = {
+  generated_at: "demo",
+  overall: {
+    track_count: 4489,
+    genre_counts: {"Rock":1297,"Electro":901,"Rap":840,"Pop":793,"Française":378,"Soul":300,"Dance":210,
+                  "Reggae":142,"Latina":89,"SoundTrack":85,"Jazz":62,"Classique":51,"Instrumental":9},
+    avg_bpm: 118.4, median_bpm: 122.0,
+    bpm_histogram: {60:16,70:121,80:262,90:434,100:349,110:381,120:671,130:312,140:246,150:143,160:151,170:152,180:61,190:20,200:23},
+    top_artists: [{name:"Linkin Park",count:47},{name:"Daft Punk",count:31},{name:"Stromae",count:24},
+                 {name:"The Weeknd",count:22},{name:"Ed Sheeran",count:19},{name:"Bigflo & Oli",count:17}]
+  },
+  yearly: {
+    "2018": {track_count:100, genre_counts:{"Pop":38,"Rap":25,"Rock":20,"Electro":10,"Soul":7}, avg_bpm:112.4, median_bpm:114.0, bpm_histogram:{}, top_artists:[]},
+    "2019": {track_count:100, genre_counts:{"Pop":30,"Rap":32,"Rock":15,"Electro":15,"Soul":8}, avg_bpm:115.1, median_bpm:116.0, bpm_histogram:{}, top_artists:[]},
+    "2020": {track_count:100, genre_counts:{"Pop":22,"Rap":35,"Rock":12,"Electro":22,"Soul":9}, avg_bpm:117.8, median_bpm:118.0, bpm_histogram:{}, top_artists:[]},
+    "2021": {track_count:100, genre_counts:{"Pop":18,"Rap":30,"Rock":18,"Electro":28,"Soul":6}, avg_bpm:119.9, median_bpm:120.0, bpm_histogram:{}, top_artists:[]},
+    "2022": {track_count:100, genre_counts:{"Pop":15,"Rap":28,"Rock":22,"Electro":30,"Soul":5}, avg_bpm:121.2, median_bpm:121.0, bpm_histogram:{}, top_artists:[]},
+    "2023": {track_count:100, genre_counts:{"Pop":12,"Rap":24,"Rock":28,"Electro":32,"Soul":4}, avg_bpm:123.6, median_bpm:124.0, bpm_histogram:{}, top_artists:[]},
+    "2024": {track_count:100, genre_counts:{"Pop":10,"Rap":20,"Rock":32,"Electro":34,"Soul":4}, avg_bpm:125.0, median_bpm:125.0, bpm_histogram:{}, top_artists:[]}
+  }
+};
+
+let data = DEMO;
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function init(d){
+  data = d;
+  document.getElementById("statTracks").textContent = data.overall.track_count.toLocaleString();
+  document.getElementById("statAvgBpm").textContent = data.overall.avg_bpm ?? "–";
+  document.getElementById("statMedianBpm").textContent = data.overall.median_bpm ?? "–";
+  document.getElementById("statGenres").textContent = Object.keys(data.overall.genre_counts).length;
+  renderBars("genreBars", sortedEntries(data.overall.genre_counts), data.overall.track_count, colorFor);
+  const bpmEntries = Object.entries(data.overall.bpm_histogram || {}).map(([k,v])=>[`${k} bpm`, v]).sort((a,b)=>parseInt(a[0])-parseInt(b[0]));
+  renderBars("bpmBars", bpmEntries, data.overall.track_count, ()=>"#D9A441");
+  const artistEntries = (data.overall.top_artists||[]).map(a=>[a.name, a.count]);
+  renderBars("artistBars", artistEntries, data.overall.track_count, ()=>"#7FA66B");
+  renderYearly();
+  renderGenreTree();
+}
+
+const SUBGENRES = {
+  "Latina": ["reggaeton","salsa","bachata"], "Classique": ["baroque","opera","symphony"],
+  "Jazz": ["bebop","swing","bossa nova"], "Reggae": ["dancehall","ska","dub"],
+  "Rap": ["hip hop","trap","drill"], "Soul": ["r&b","funk","gospel"],
+  "Electro": ["house","techno","dubstep"], "Dance": ["disco","eurodance","hyperpop"],
+  "Rock": ["metal","punk","grunge"], "SoundTrack": ["film score","anime","ost"],
+  "Française": ["chanson","variété"], "Pop": ["indie","synthpop","folk"], "Instrumental": ["instrumental"],
+};
+
+function labelAttrs(angle, offset){
+  const cosA = Math.cos(angle), sinA = Math.sin(angle);
+  if (Math.abs(cosA) >= Math.abs(sinA)) {
+    const right = cosA > 0;
+    return { dx: right?offset:-offset, dy: 0, anchor: right?"start":"end", baseline:"0.35em" };
+  } else {
+    const below = sinA > 0;
+    return { dx: 0, dy: below?offset:-offset, anchor:"middle", baseline: below?"0.8em":"-0.1em" };
+  }
+}
+
+function renderGenreTree(){
+  const svgEl = document.getElementById("genreTree");
+  const counts = data.overall.genre_counts || {};
+  const cats = Object.keys(SUBGENRES).filter(c => SUBGENRES[c]); // fixed order, stable layout run to run
+  if (!Object.keys(counts).length) { svgEl.innerHTML = ""; return; }
+  // Bigger canvas than a chat widget would allow: this is a persistent page, not width-locked to 680px,
+  // so there's room to space categories (and their sub-genre labels) further apart before they crowd
+  // their neighbours - the previous, tighter version had "Instrumental"/"Latina" (adjacent slices - the
+  // last and first categories in the circle are neighbours) and a few sub-genre pairs overlapping.
+  const CX=450, CY=450, R0=38, R1=150, R2=300, N=cats.length;
+  const catR = c => 0.55*Math.sqrt(Math.max(c,1))+4;
+  const subR = (rank,total) => total>1 ? 7-rank*(4/(total-1)) : 6;
+  const text = (x,y,anchor,cls,content,dyBaseline) =>
+    `<text class="${cls}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" dy="${dyBaseline}" text-anchor="${anchor}">${escapeHtml(content)}</text>`;
+
+  let svg = '<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5"/></marker></defs>';
+  svg += `<circle cx="${CX}" cy="${CY}" r="${R0}" fill="var(--panel-raised)" stroke="var(--hairline)" stroke-width="0.5"/>`;
+  svg += text(CX, CY, "middle", "th-tree", "Your library", "0.35em");
+
+  cats.forEach((name,i)=>{
+    const count = counts[name] || 0;
+    const angle = (i/N)*2*Math.PI - Math.PI/2;
+    const cx = CX + R1*Math.cos(angle), cy = CY + R1*Math.sin(angle);
+    const r = catR(count);
+    svg += `<path d="M${(CX+R0*Math.cos(angle)).toFixed(1)} ${(CY+R0*Math.sin(angle)).toFixed(1)}L${cx.toFixed(1)} ${cy.toFixed(1)}" fill="none" stroke="var(--hairline)" stroke-width="${(1+r/10).toFixed(1)}"/>`;
+    // Tighter than before (was 0.75x the slice): each category's sub-genre fan now stays well inside
+    // its own angular slot, instead of reaching into a neighbouring category's space.
+    const spread = (2*Math.PI/N)*0.5;
+    (SUBGENRES[name]||[]).forEach((sub,j,arr)=>{
+      const t = arr.length>1 ? (j/(arr.length-1)-0.5) : 0;
+      const sa = angle + t*spread;
+      const sx = CX + R2*Math.cos(sa), sy = CY + R2*Math.sin(sa);
+      const sr = subR(j, arr.length);
+      const sAttrs = labelAttrs(sa, sr+7);
+      svg += `<path d="M${cx.toFixed(1)} ${cy.toFixed(1)}L${sx.toFixed(1)} ${sy.toFixed(1)}" fill="none" stroke="var(--text-faint)" stroke-width="${(0.5+sr/12).toFixed(1)}"/>`;
+      svg += `<circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${sr.toFixed(1)}" fill="var(--text-faint)"/>`;
+      svg += text(sx+sAttrs.dx, sy+sAttrs.dy, sAttrs.anchor, "ts-tree", sub, sAttrs.baseline);
+    });
+    const cAttrs = labelAttrs(angle, r+12);
+    svg += `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r.toFixed(1)}" fill="${colorFor(name)}" stroke="var(--hairline)" stroke-width="0.5"/>`;
+    svg += text(cx+cAttrs.dx, cy+cAttrs.dy, cAttrs.anchor, "th-tree", `${name} (${count})`, cAttrs.baseline);
+  });
+  svgEl.innerHTML = svg;
+}
+
+function sortedEntries(obj){
+  return Object.entries(obj).sort((a,b)=>b[1]-a[1]);
+}
+
+function renderBars(elId, entries, total, colorFn){
+  const el = document.getElementById(elId);
+  el.innerHTML = "";
+  if(!entries.length){ el.innerHTML = '<div class="empty">No data yet - run the script and load its report.</div>'; return; }
+  // With a real total (counts that sum to something meaningful, e.g. genre/BPM/artist track counts),
+  // bar width = true percentage of that total. Without one (e.g. average bpm per year - not a count),
+  // fall back to scaling relative to the largest value, since "percentage" wouldn't mean anything there.
+  const max = Math.max(...entries.map(e=>e[1]), 1);
+  entries.forEach(([label, count])=>{
+    const width = total ? (count/total*100) : (count/max*100);
+    const row = document.createElement("div");
+    row.className = "bar-row";
+    row.innerHTML = `<span class="bar-label">${escapeHtml(label)}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${width.toFixed(1)}%;background:${colorFn(label)}"></span></span>
+      <span class="bar-value">${count.toLocaleString()}${total ? " ("+(count/total*100).toFixed(0)+"%)" : ""}</span>`;
+    el.appendChild(row);
+  });
+}
+
+function renderYearly(){
+  const years = Object.keys(data.yearly || {}).sort();
+  const yearsRow = document.getElementById("yearsRow");
+  const legend = document.getElementById("yearlyLegend");
+  const bpmHint = document.getElementById("yearlyBpmHint");
+  yearsRow.innerHTML = "";
+  legend.innerHTML = "";
+  if(!years.length){
+    yearsRow.innerHTML = '<div class="empty">No yearly playlists detected - enable ANALYZE_YEARLY_PLAYLISTS and re-run to see this.</div>';
+    document.getElementById("yearlyBpmBars").innerHTML = "";
+    bpmHint.textContent = "";
+    return;
+  }
+  bpmHint.textContent = "From the same yearly playlists as above";
+  const allGenres = new Set();
+  years.forEach(y => Object.keys(data.yearly[y].genre_counts||{}).forEach(g=>allGenres.add(g)));
+
+  years.forEach(y=>{
+    const yd = data.yearly[y];
+    const total = yd.track_count || 1;
+    const col = document.createElement("div");
+    col.className = "year-col";
+    const stack = document.createElement("div");
+    stack.className = "year-stack";
+    sortedEntries(yd.genre_counts||{}).forEach(([g,c])=>{
+      const seg = document.createElement("div");
+      seg.className = "year-seg";
+      seg.style.height = (c/total*100).toFixed(1)+"%";
+      seg.style.background = colorFor(g);
+      seg.title = `${g}: ${c}`;
+      stack.appendChild(seg);
+    });
+    const lbl = document.createElement("div"); lbl.className = "year-label"; lbl.textContent = y;
+    const cnt = document.createElement("div"); cnt.className = "year-count"; cnt.textContent = yd.track_count+" tracks";
+    col.append(stack, lbl, cnt);
+    yearsRow.appendChild(col);
+  });
+
+  [...allGenres].sort().forEach(g=>{
+    const item = document.createElement("div"); item.className = "legend-item";
+    item.innerHTML = `<span class="legend-swatch" style="background:${colorFor(g)}"></span>${escapeHtml(g)}`;
+    legend.appendChild(item);
+  });
+
+  const bpmEntries = years.filter(y=>data.yearly[y].avg_bpm != null).map(y=>[y, data.yearly[y].avg_bpm]);
+  renderBars("yearlyBpmBars", bpmEntries, 0, ()=>"#D9A441");
+}
+
+document.querySelectorAll(".tab").forEach(tab=>{
+  tab.onclick = ()=>{
+    document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
+    document.querySelectorAll(".panel").forEach(p=>p.classList.remove("active"));
+    tab.classList.add("active");
+    document.getElementById("panel-"+tab.dataset.tab).classList.add("active");
+  };
+});
+
+document.getElementById("fileInput").onchange = (e)=>{
+  const file = e.target.files[0]; if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ()=>{
+    try{
+      const parsed = JSON.parse(reader.result);
+      document.getElementById("sourceLabel").textContent = "Loaded: " + file.name;
+      init(parsed);
+    }catch(err){ alert("Could not read this file as JSON: " + err.message); }
+  };
+  reader.readAsText(file);
+};
+
+if (window.__PRELOADED_ANALYSIS__) {
+  document.getElementById("sourceLabel").textContent = "Loaded automatically from your last analysis run";
+  init(window.__PRELOADED_ANALYSIS__);
+} else {
+  init(DEMO);
+}
+</script>
+</body>
+</html>

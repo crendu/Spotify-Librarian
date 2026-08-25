@@ -10,7 +10,7 @@ no track is added, removed, or moved. Actually changing your library is a delibe
 
 ## What it produces
 
-A console report, four CSV files, and `report.json` (for the review interface — see "Applying the
+A console report, five CSV files, and `report.json` (for the review interface — see "Applying the
 changes" below), all in `rapport_spotify/`:
 
 | # | Report | Content |
@@ -19,12 +19,16 @@ changes" below), all in `rapport_spotify/`:
 | 2 | `2_misplaced.csv` | Tracks already in a playlist whose measured BPM or detected genre disagrees with it |
 | 3 | `3_duplicates.csv` | Same track appearing more than once in a playlist (exact match or same name+artist) — checked in every BPM/genre playlist, your source playlist, and (optionally) every other playlist you own |
 | 4 | `4_playlists_to_create.csv` | BPM or genre playlists that don't exist yet, with the tracks waiting for them |
+| 5 | `5_library_backup.csv` | Every analysed track — title, artists, album, a direct Spotify link, measured BPM/genre, and every playlist it's in — your own copy, independent of Spotify (`EXPORT_LIBRARY_BACKUP`, on by default) |
+
+Also written: `analysis.json`, for `analysis.html` — genre/BPM/artist trends across your library, see
+"Library analysis" below.
 
 Every genre verdict states its source (`Last.fm (track)`, `Last.fm (artist)`, `iTunes (track)`, `Spotify
 (artist)`) so you can judge how much to trust it.
 
 Artist-follow suggestions (`AUTO_FOLLOW_ARTISTS`) live only in `report.json` and the review interface, not
-in any of the four CSVs above.
+in any of the CSVs above.
 
 ## Why this is more complicated than it sounds
 
@@ -90,6 +94,8 @@ it — it won't send you into a confusing Spotify login error.
 | `CHECK_ALL_PLAYLISTS_FOR_DUPLICATES` | Also check every OTHER playlist you own (not just BPM/genre ones) for duplicates |
 | `AUTO_OPEN_REVIEW` | Open `review_interface.html` automatically at the end of a run, report already loaded |
 | `AUTO_FOLLOW_ARTISTS` | Also suggest (via the review interface) following every artist in your library you don't follow yet |
+| `EXPORT_LIBRARY_BACKUP` | Write `5_library_backup.csv` — every analysed track, independent of Spotify (on by default) |
+| `ANALYZE_YEARLY_PLAYLISTS` | Detect your own "top songs of the year" playlists and add a by-year trend to `analysis.html` |
 | `ANALYZE_DEEZER_PREVIEWS` | Last-resort BPM: download 30 s previews and measure the tempo locally |
 | `TEST_EXTERNES` | Paste track links to test ReccoBeats/Last.fm without touching your Spotify quota |
 
@@ -138,7 +144,11 @@ This means a track tagged `["electronic", "house", "trap"]` votes 2-1 for Electr
 ambiguous tag can no longer overrule a clear majority.
 
 If you spot a genre you disagree with, the cheapest fix is almost always an `EXPLICIT_GENRE_MAP` entry —
-it takes effect on every future run at no extra API cost.
+it takes effect on every future run at no extra API cost. You don't have to edit the CONFIG by hand for
+this: tags that matched nothing show up in the review interface, grouped by the track they came from (a
+track can carry several unmapped tags at once — they show as one block, not one disconnected row per tag),
+each with a dropdown to pin it to a category. Export your decisions as usual; the pin takes effect starting
+with your very next analysis, not just the following `--apply`.
 
 Two categories exist specifically as deliberate, un-audited catch-alls (like Pop): **Instrumental** (tag
 `instrumental` — a performance style, not a genre, so it only wins when nothing more specific also matched)
@@ -166,6 +176,41 @@ automatically; it's suggested like any other change and only takes effect throug
 This uses the unified library endpoints Spotify introduced in February 2026
 (`GET`/`PUT /me/library` with `spotify:artist:{id}` URIs) — the older, entity-specific follow endpoints this
 kind of feature would normally use were removed that same month for apps in Development Mode.
+
+## Library analysis (optional)
+
+Every run also writes `analysis.json`. Open `analysis.html` (same folder, no server or install needed) and
+load it to see:
+
+- **Overview** — your top artists, genre distribution, and tempo distribution across the analysed library,
+  plus a genre/sub-genre map (each category sized by your real track count; the thin branches are the
+  keywords the script recognises for that category, not a measured per-keyword count).
+- **By year** — with `ANALYZE_YEARLY_PLAYLISTS` on, a genre-mix trend across your own "top songs of the
+  year" playlists, plus average tempo per year.
+
+Detecting those yearly playlists isn't as simple as looking for ones you own: Spotify's own "Your Top Songs
+2023"-style playlists are algorithmic and typically owned by Spotify itself, not you, even once you've
+followed them into your library — and ownership alone can't tell one apart from an unrelated Spotify
+editorial playlist that also happens to mention a year (e.g. a generic "Hits 2010" compilation). What does
+reliably set them apart: Spotify always writes a description that names you personally ("Conçue pour
+\<your name\>", "Made for \<your name\>", whatever the phrasing in your language) — a generic editorial
+playlist's description never does. A playlist you made yourself that happens to mention a year is still
+picked up if you own it, as a fallback.
+
+## Running it as a standalone .exe (optional)
+
+If double-clicking a `.py` file isn't convenient on your machine, the script can be packaged into a single
+`SpotifySortPlaylist.exe` with PyInstaller — no Python install required to run it afterwards. See
+`BUILD_EXE.md` for the exact build command (it needs two `--hidden-import` flags for packages this script
+loads on demand, which PyInstaller can't detect on its own) and how launching works: double-clicking the
+`.exe` with no arguments now asks, right in the console window, whether to analyse or apply — no shortcut
+juggling needed to pass `--apply`.
+
+Windows closes a double-clicked `.exe`'s console window the instant the process ends — success, a config
+error, or a crash all vanish just as fast otherwise, taking the message with them. The packaged `.exe`
+now waits for a keypress before closing no matter how it ends, so there's always time to read what
+happened; a plain `python SpotifySortPlaylist.py` run is unaffected (that window belongs to the shell, not
+the script, so it was never at risk of disappearing).
 
 ## Applying the changes (phase 2)
 
@@ -208,10 +253,19 @@ already-applied changes are recognised as done and skipped, nothing is ever doub
   playlist, and it never touches a track that isn't part of an action you approved.
 - Local files without a matched catalog equivalent still can't be acted on directly (the API has no way to
   add/move a raw MP3) — they stay a manual, drag-and-drop job.
-- This write path is thoroughly unit-tested against a simulated Spotify client, but — unlike the read-only
-  analysis, exercised for real over many runs — it has not been exercised against the live API. For your
-  first `--apply`, consider approving something small first (the exact-ID duplicates are the lowest-risk
-  starting point) before doing a full run.
+- Exercised against the real API over multiple full runs (playlist creation, adds, moves, duplicate removal,
+  artist-follow) — not just simulated. One real quirk turned up and got fixed along the way: the artist-follow
+  endpoint (`PUT /me/library`) rejects the identifiers when sent as a JSON body, even though Spotify's own
+  migration guide shows exactly that — they have to go in the query string instead (see Troubleshooting).
+  For your very first `--apply` on a new setup, approving something small first (the exact-ID duplicates are
+  the lowest-risk starting point) is still a reasonable way to build confidence before a full run.
+
+In the review interface, two things that look like duplicated rows at a glance are intentional: a track
+needing both a BPM and a genre decision under the same uncertainty reason shows as two lines, each labelled
+`(bpm)` / `(genre)`; a track with 3+ copies in one playlist shows one line per extra copy, each saying how
+many copies exist in total. Review groups are also sorted by category first (genre, then BPM, then
+duplicates, then local-file matches, then artist-follows), by size within each — not just by raw size across
+everything, which used to interleave unrelated categories.
 
 ## Troubleshooting
 
@@ -236,5 +290,10 @@ already-applied changes are recognised as done and skipped, nothing is ever doub
 - **Artist-follow calls fail even though `AUTO_FOLLOW_ARTISTS` is on** — Spotify removed the old
   entity-specific follow endpoints for Development Mode apps in February 2026; this script already targets
   their replacement (`/me/library`) directly rather than through spotipy's now-outdated built-in methods.
-  If this ever breaks again, check Spotify's Web API changelog for further endpoint changes before assuming
-  it's a bug here.
+  If you see `Missing required field: uris` specifically, that's this endpoint rejecting identifiers sent as
+  a JSON body — they need to be a comma-separated query parameter instead (already how this script sends
+  them; a long-documented quirk on this endpoint's predecessors, `/me/tracks` and `/me/albums`, too).
+- **"ReccoBeats: N to try" is smaller than the "still to fetch" count right after** — expected, not a
+  miscount: ReccoBeats can only look up tracks with a real Spotify ID, so local files are excluded from "to
+  try" but still counted in "still to fetch" once the stage moves on. The console line says how many were
+  skipped for this reason.
