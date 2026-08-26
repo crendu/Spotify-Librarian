@@ -1,14 +1,14 @@
-# Spotify Playlist Sorter
+# Spotify Librarian
 
-Sorts your Spotify library by BPM and genre, and shows genre/BPM/artist trends across it. Split into four
-files that stay in the same folder:
+Sorts your Spotify library by BPM and genre, and shows genre/BPM/artist trends across it — a librarian for
+your collection, not just a sorter. Split into four files that stay in the same folder:
 
 | File | What it does |
 |---|---|
 | `SpotifyCore.py` | Shared engine — CONFIG, cache, BPM/genre cascades. Not run directly. |
 | `SpotifySortPlaylist.py` | Sorts your library: where each track should go, misplaced tracks, duplicates. |
 | `SpotifyLibraryAnalysis.py` | Genre/BPM/artist trends, optionally by year, plus a full library backup CSV. |
-| `SpotifyTools.py` | One entry point with a menu — run this if you don't want to remember which script does what. |
+| `SpotifyLibrarian.py` | One entry point with a menu — run this if you don't want to remember which script does what. |
 
 A plain run of `SpotifySortPlaylist.py` is **read-only**: it only ever reads your library
 (`playlist-read-private`, `playlist-read-collaborative`, and optionally `user-library-read` for Liked
@@ -124,10 +124,10 @@ cache/output paths. Only touch these to change how the classifier *thinks*.
 ```bash
 python SpotifySortPlaylist.py          # sort: analyse (read-only)
 python SpotifyLibraryAnalysis.py       # analysis: trends + backup, always read-only
-python SpotifyTools.py                 # menu: pick one interactively, or "sort"/"analysis" as an argument
+python SpotifyLibrarian.py                 # menu: pick one interactively, or "sort"/"analysis" as an argument
 ```
 
-Any of the three works — `SpotifyTools.py` is purely a convenience front door if you don't want to
+Any of the three works — `SpotifyLibrarian.py` is purely a convenience front door if you don't want to
 remember which script does what. All three also work packaged into a single `.exe` if you'd rather
 double-click than type a command — see "Running it as a standalone .exe" below.
 
@@ -222,7 +222,7 @@ picked up if you own it, as a fallback.
 ## Running it as a standalone .exe (optional)
 
 If double-clicking a `.py` file isn't convenient on your machine, the whole project can be packaged into a
-single `SpotifyTools.exe` with PyInstaller — no Python install required to run it afterwards. Must be done
+single `SpotifyLibrarian.exe` with PyInstaller — no Python install required to run it afterwards. Must be done
 on a Windows machine (PyInstaller builds for whatever OS it runs on). All four `.py` files need to stay in
 the same folder, whether running with `python` or compiling.
 
@@ -245,7 +245,7 @@ If `pip` alone isn't recognised (common on a machine where only `python` is on t
 From the folder containing the 4 `.py` files:
 
 ```
-python -m PyInstaller --onefile --name SpotifyTools --console --hidden-import=truststore --hidden-import=librosa --distpath . SpotifyTools.py
+python -m PyInstaller --onefile --name SpotifyLibrarian --console --hidden-import=truststore --hidden-import=librosa --distpath . SpotifyLibrarian.py
 ```
 
 (`python -m PyInstaller` rather than bare `pyinstaller`, same PATH reason as `pip` above.)
@@ -264,7 +264,7 @@ python -m PyInstaller --onefile --name SpotifyTools --console --hidden-import=tr
 
 Unlike `truststore`/`librosa`, **`SpotifyCore.py`, `SpotifySortPlaylist.py`, and `SpotifyLibraryAnalysis.py`
 need no `--hidden-import`**: they're plain imports (`import SpotifySortPlaylist` at the top of
-`SpotifyTools.py`) that PyInstaller detects and bundles on its own by analysing the code — as long as all
+`SpotifyLibrarian.py`) that PyInstaller detects and bundles on its own by analysing the code — as long as all
 four files sit in the same folder at compile time.
 
 A `build\` folder and a `.spec` file also appear alongside — build artefacts with no further use, safe to
@@ -275,7 +275,7 @@ want the cache and reports to live in (your usual `Downloads\Spotify` folder, fo
 
 ### Launching it
 
-Double-clicking `SpotifyTools.exe` on its own shows a menu:
+Double-clicking `SpotifyLibrarian.exe` on its own shows a menu:
 ```
 What do you want to do?
   1) Sort my library (analyse - read-only)
@@ -288,9 +288,9 @@ analysing and applying, or between sorting and analysing.
 
 For scripting/automation without the menu, command-line arguments work too:
 ```
-SpotifyTools.exe sort
-SpotifyTools.exe sort --apply
-SpotifyTools.exe analysis
+SpotifyLibrarian.exe sort
+SpotifyLibrarian.exe sort --apply
+SpotifyLibrarian.exe analysis
 ```
 
 The cache (`cache_spotify_tri.json`), the login token (`.spotify_token_cache`), and the report folder
@@ -300,7 +300,7 @@ The cache (`cache_spotify_tri.json`), the login token (`.spotify_token_cache`), 
 
 Whether the run succeeds, hits a config error, or crashes unexpectedly, the exe now waits for a keypress
 before closing its window — Windows otherwise closes a double-clicked exe's console the instant the process
-ends, taking the message with it, success or failure alike. A plain `python SpotifyTools.py` (or either
+ends, taking the message with it, success or failure alike. A plain `python SpotifyLibrarian.py` (or either
 script on its own) from an already-open terminal never has this problem (the terminal owns that window,
 not the script) and isn't affected by this pause.
 
@@ -308,14 +308,14 @@ If you'd still rather have a separate launcher (say, to automate several steps),
 still works:
 ```bat
 @echo off
-SpotifyTools.exe sort --apply
+SpotifyLibrarian.exe sort --apply
 pause
 ```
 
 ### The first launch will be slower
 
 PyInstaller bundles Python and every dependency into the exe — the very first startup (extracting to a
-temp folder) takes a few seconds longer than `python SpotifyTools.py`. Later launches are the same either
+temp folder) takes a few seconds longer than `python SpotifyLibrarian.py`. Later launches are the same either
 way.
 
 ### Antivirus
@@ -347,7 +347,7 @@ A plain run is always read-only. To actually change your library, there are thre
    individual track afterwards. A small VU-meter on each group fills up live as you include its tracks, so
    you can see your progress at a glance. Decide which not-yet-existing playlists (140 bpm, SoundTrack...)
    are worth creating. Click "Export decisions" — this downloads `decisions.json` to your Downloads folder.
-3. **Apply** — `python SpotifySortPlaylist.py --apply` (or `python SpotifyTools.py sort --apply`). It
+3. **Apply** — `python SpotifySortPlaylist.py --apply` (or `python SpotifyLibrarian.py sort --apply`). It
    re-checks your library fresh (fast, thanks to the cache), applies your decisions, and shows a **full
    preview** of every playlist to create, track to add, move, or remove — grouped and counted. Nothing is
    written until you type `yes` at the single confirmation prompt that follows.
