@@ -68,6 +68,7 @@ __all__ = [
     "OUTPUT_DIR",
     "CACHE_FILE",
     "DECISIONS_FILE",
+    "DATA_DIR",
     "DEEZER_URL",
     "ITUNES_URL",
     "LASTFM_URL",
@@ -87,6 +88,7 @@ __all__ = [
     "validate_config",
     "get_client",
     "fetch_all",
+    "_split_artist_title",
     "_parse_playlist_items",
     "get_playlist_tracks",
     "_liked_songs_failure",
@@ -120,14 +122,16 @@ __all__ = [
     "_tag_vote",
     "_tag_votes",
     "match_category",
-    "_is_close_vote",
+    "_close_vote_alt",
     "_genre_cache",
     "resolve_genre",
     "run_external_test",
     "_norm",
     "match_local_tracks",
     "gather_real_data",
-    "load_tag_mappings"
+    "load_tag_mappings",
+    "open_review_interface",
+    "_local_file_uri"
 ]
 
 def _ensure_package(module, pip_name=None):
@@ -270,9 +274,12 @@ MAX_ARTIST_LOOKUPS = 200
 USE_DEEZER_BPM_FALLBACK = True      # BPM by artist+title when ReccoBeats does not know the exact id
 USE_ITUNES_GENRE_FALLBACK = True    # coarse genre by artist+title when Last.fm knows nothing
 
-OUTPUT_DIR = "rapport_spotify"          # folder for the report (CSVs, report.json, review.html)
-CACHE_FILE = "cache_spotify_tri.json"   # the project's memory: do NOT delete it
-DECISIONS_FILE = "decisions.json"       # where --apply looks for your reviewed decisions (see below)
+DATA_DIR = ".spotify_data"          # the cache and login token live here, out of the way of your source files
+DECISIONS_FILE = "decisions.json"   # where --apply looks for your reviewed decisions (see below)
+OUTPUT_DIR = "rapport_spotify"      # folder for the report (CSVs, report.json, review.html)
+
+# the project's memory: do NOT delete it
+CACHE_FILE = os.path.join(DATA_DIR, "cache_spotify_tri.json")
 
 DEEZER_URL = "https://api.deezer.com"
 ITUNES_URL = "https://itunes.apple.com/search"
@@ -286,6 +293,20 @@ READ_SCOPES = ("playlist-read-private playlist-read-collaborative"
 WRITE_SCOPES = ("playlist-modify-private playlist-modify-public"
             + (" user-follow-modify" if AUTO_FOLLOW_ARTISTS else ""))   # only requested for --apply
 
+# Proxy: requests reads HTTP_PROXY/HTTPS_PROXY from the environment by default
+if PROXY_URL:
+    os.environ["HTTP_PROXY"] = PROXY_URL
+    os.environ["HTTPS_PROXY"] = PROXY_URL
+    os.environ["NO_PROXY"] = "127.0.0.1,localhost"  # the OAuth callback stays local, it must not go through the proxy
+
+# Certificates: corporate proxies with SSL inspection re-sign HTTPS traffic with their own CA, which Python's bundled certifi store does not trust
+if USE_SYSTEM_CERTS:
+    _ts = _ensure_package("truststore")
+    if _ts:
+        _ts.inject_into_ssl()   # Python now validates against the OS certificate store
+    else:
+        print("INFO: running without 'truststore' - needed behind an SSL-inspecting proxy, harmless otherwise.", file=sys.stderr)
+
 # ======================================================================================================================
 # END OF CONFIG - nothing to modify below
 # ======================================================================================================================
@@ -296,8 +317,10 @@ GENRE_PLAYLIST_NAMES = [name for name, _ in GENRE_RULES]
 _SPOTIFY_ID_RE = re.compile(r"[A-Za-z0-9]{22}")
 
 _http = requests.Session()
+if PROXY_URL:
+    _http.proxies = {"http": PROXY_URL, "https": PROXY_URL}
 
-_cache = {"playlists": {}, "tempos": {}, "lastfm": {}, "localmatch": {}, "bpm_corroboration": {}}
+_cache = {"playlists": {}, "tempos": {}, "lastfm": {}, "localmatch": {}, "bpm_corroboration": {}, "quota_first_hit": {}, "mood": {}}
 
 _cache_dirty = 0
 
@@ -329,6 +352,7 @@ def save_cache(force=False):
     if not force and _cache_dirty < 50:
         return
     try:
+        os.makedirs(os.path.dirname(CACHE_FILE) or ".", exist_ok=True)
         tmp = CACHE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(_cache, f, ensure_ascii=False)
@@ -346,11 +370,19 @@ def quota_exit(context, retry_after=None):
         h, mn = divmod(secs // 60, 60)
         resume = time.localtime(time.time() + secs)
         day = " tomorrow" if resume.tm_mday != time.localtime().tm_mday else ""
-        when = f"Spotify says: retry in {h} h {mn:02d} min (around {time.strftime('%H:%M', resume)}{day})."
+        when = f"retry in {h}h{mn:02d} (around {time.strftime('%H:%M', resume)}{day})"
     else:
-        when = "Spotify did not say when; usually ~24 h after the first refusal."
-    print(f"\nERROR: Spotify quota exhausted ({context}). {when}\n"
-          f"Cache saved: the next run only fetches what is missing.", file=sys.stderr)
+        first_hit = _cache.setdefault("quota_first_hit", {})
+        now = time.time()
+        if context not in first_hit:
+            first_hit[context] = now
+            when = "no retry time given - usually clears ~24h from now"
+        else:
+            elapsed_h = (now - first_hit[context]) / 3600
+            resume = time.localtime(first_hit[context] + 24 * 3600)
+            day = " tomorrow" if resume.tm_mday != time.localtime().tm_mday else ""
+            when = f"first hit {elapsed_h:.0f}h ago, usually clears ~24h after that (around {time.strftime('%H:%M', resume)}{day})"
+    print(f"Spotify quota hit ({context}): {when}. Saved - this step stops, the rest of the run continues.", file=sys.stderr)
     sys.exit(1)
 
 def spotify_call(fn, context, attempts=4):
@@ -369,14 +401,15 @@ def spotify_call(fn, context, attempts=4):
                     print(f"  ! Spotify rate-limit on {context} -> pausing {short}s (attempt {attempt}/{attempts - 1}, looks like a short burst, not the daily quota)", file=sys.stderr)
                     time.sleep(short)
                     continue
-                if not retry_after:
-                    # Proof, not a guess: shows whether Spotify truly sent nothing, or something got lost reading it.
-                    print(f"  (no Retry-After on this 429 - full headers for reference: {dict(headers) if headers else 'no headers object at all'})", file=sys.stderr)
-                quota_exit(context, retry_after)
+                quota_exit(context, retry_after, headers)
             raise
         except requests.exceptions.RequestException as e:
             if attempt == attempts:
-                raise
+                save_cache(force=True)
+                sys.exit(f"! could not reach Spotify during {context} after {attempts - 1} retries ({type(e).__name__}: {e}).\n"
+                        f"  Check your internet connection, and PROXY_URL/USE_SYSTEM_CERTS in the CONFIG block if\n"
+                        f"  you're on a restricted network (e.g. a corporate proxy) - progress so far is saved,\n"
+                        f"  just run again once connectivity is back.")
             print(f"  ! flaky network on {context} ({type(e).__name__}) -> retry {attempt}/{attempts - 1} in 5 s", file=sys.stderr)
             time.sleep(5)
 
@@ -414,12 +447,17 @@ def get_client(apply_mode=False) -> spotipy.Spotify:
     problems = validate_config(require_spotify=True)
     if problems:
         sys.exit("The script cannot start: something in the CONFIG block needs fixing.\n\n  * "
-                 + "\n\n  * ".join(problems)
-                 + "\n\nFix the line(s) above in the CONFIG block at the top of the file, save, and run again.")
+                + "\n\n  * ".join(problems)
+                + "\n\nFix the line(s) above in the CONFIG block at the top of the file, save, and run again.")
     scopes = READ_SCOPES + (" " + WRITE_SCOPES if apply_mode else "")
+    proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+
+    # spotipy writes the token cache itself - the folder has to exist first
+    os.makedirs(DATA_DIR, exist_ok=True)
 
     # status_retries=0: on a 429 (quota), spotipy raises immediately instead of sleeping for hours
-    auth = SpotifyOAuth(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, redirect_uri=SPOTIFY_REDIRECT_URI, scope=scopes, open_browser=True, cache_path=".spotify_token_cache")
+    auth = SpotifyOAuth(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, redirect_uri=SPOTIFY_REDIRECT_URI,
+                        scope=scopes, open_browser=True, cache_path=os.path.join(DATA_DIR, ".spotify_token_cache"), proxies=proxies)
 
     # A saved login that doesn't cover what THIS run needs (typically: you logged in for a plain analysis, then ran --apply for the first time)
     # would otherwise be reused as-is and fail deep into the run with a raw "Insufficient client scope" 403.
@@ -428,12 +466,12 @@ def get_client(apply_mode=False) -> spotipy.Spotify:
         missing = set(scopes.split()) - set((cached.get("scope") or "").split())
         if missing:
             print(f"! Your saved Spotify login is missing permission(s) this run needs: {', '.join(sorted(missing))}\n"
-                  f"  Removing the old login so Spotify asks for them (your browser will reopen) ...")
+                f"  Removing the old login so Spotify asks for them (your browser will reopen) ...")
             try:
                 os.remove(auth.cache_handler.cache_path)
             except OSError as e:
                 print(f"  ! could not remove {auth.cache_handler.cache_path} ({e}) - delete it by hand if the browser does not reopen.", file=sys.stderr)
-    return spotipy.Spotify(auth_manager=auth, retries=3, status_retries=0, requests_timeout=15)
+    return spotipy.Spotify(auth_manager=auth, proxies=proxies, retries=3, status_retries=0, requests_timeout=15)
 
 def fetch_all(sp, first_page, context="pagination"):
     """Follows the "next page" links of a paginated Spotify answer and returns all items."""
@@ -442,6 +480,14 @@ def fetch_all(sp, first_page, context="pagination"):
         page = spotify_call(lambda p=page: sp.next(p), context)
         items.extend(page["items"])
     return items
+
+def _split_artist_title(name):
+    """Loosely-tagged local files often cram "Artist - Title" into just the title field, artist tag left blank.
+    Splits on a dash SURROUNDED BY SPACES specifically so this only fires on the naming convention it's meant for.."""
+    m = re.match(r"^\s*(.+?)\s+[-\u2013\u2014]\s+(.+?)\s*$", name)
+    if m and len(m.group(1)) >= 2 and len(m.group(2)) >= 2:
+        return m.group(1), m.group(2)
+    return None, name
 
 def _parse_playlist_items(items, skipped=None):
     """Turns raw playlist items into simple track dicts. Local files are kept (with a stable synthetic id) when
@@ -454,8 +500,15 @@ def _parse_playlist_items(items, skipped=None):
             continue
         if t.get("is_local"):
             if INCLUDE_LOCAL_FILES and t.get("name"):
-                artists = ", ".join(a.get("name", "") for a in t.get("artists", []) if a.get("name")) or "?"
-                tracks.append({"id": f"local::{artists.lower()}::{t['name'].lower()}", "name": t["name"], "artists": artists, "artist_ids": [], "local": True, "album": ""})
+                artists = ", ".join(a.get("name", "") for a in t.get("artists", []) if a.get("name"))
+                name = t["name"]
+                if not artists:
+                    # Worth trying to recover the artist before giving up on it entirely.
+                    guessed_artist, name = _split_artist_title(name)
+                    if guessed_artist:
+                        artists = guessed_artist
+                artists = artists or "?"
+                tracks.append({"id": f"local::{artists.lower()}::{name.lower()}", "name": name, "artists": artists, "artist_ids": [], "local": True, "album": ""})
             elif skipped is not None:
                 skipped["local file"] = skipped.get("local file", 0) + 1
             continue
@@ -505,8 +558,7 @@ def get_playlist_tracks(sp, playlist_id, snapshot_id=None):
     if api_total is not None and len(tracks) < api_total:
         detail = ", ".join(f"{v} {k}" for k, v in sorted(skipped.items(), key=lambda kv: -kv[1])) or "none"
         note = "" if received >= api_total else f" | PAGINATION STOPPED EARLY at {received} (next={bool(page.get('next'))})"
-        print(f"  i {playlist_id}: API total={api_total}, items received={received}, kept={len(tracks)} "
-              f"(skipped: {detail}){note}")
+        print(f"  i {playlist_id}: API total={api_total}, items received={received}, kept={len(tracks)} (skipped: {detail}){note}")
 
     # 2) fallback: old /tracks endpoint via spotipy (pre-migration apps)
     if not new_ok and not tracks:
@@ -528,7 +580,7 @@ def _liked_songs_failure(e, read_so_far):
     note = "quota exhausted" if getattr(e, "http_status", None) == 429 else type(e).__name__
     extra = f" -> keeping the {read_so_far} already read" if read_so_far else " -> continuing without them"
     print(f"  ! Liked Songs unavailable ({note}){extra}. This is an optional extra, not the main source -\n"
-          f"    the rest of the analysis (your playlists, the source playlist) is unaffected.", file=sys.stderr)
+        f"    the rest of the analysis (your playlists, the source playlist) is unaffected.", file=sys.stderr)
 
 def get_liked_tracks(sp):
     """Reads the user's "Liked Songs" library (50 per call). Cached, invalidated when the liked count changes.
@@ -674,6 +726,10 @@ def get_tempos(sp, tracks_by_id):
                 _cache["tempos"][sid] = tempos[sid]
                 _cache_dirty += 1
                 found += 1
+            if sid:
+                mood = {k: item[k] for k in ("energy", "valence", "danceability", "acousticness") if k in item}
+                if mood:
+                    _cache.setdefault("mood", {})[sid] = mood
 
         checked = min(i + 40, len(rb_ids))  # A threshold, not "checked % 100 == 0": batches step by 40, so a plain modulo would silently print every 200 instead of every ~100.
         if checked >= next_print or checked == len(rb_ids):
@@ -760,7 +816,7 @@ def _deezer_sanity_check():
         return bool(r.json().get("data"))
     except requests.exceptions.SSLError as e:
         print(f"      (reason: SSL certificate error - {e.__class__.__name__}. Likely your proxy's SSL "
-              f"inspection cert isn't trusted; check USE_SYSTEM_CERTS and that 'truststore' installed OK.)")
+            f"inspection cert isn't trusted; check USE_SYSTEM_CERTS and that 'truststore' installed OK.)")
         return False
     except (requests.RequestException, ValueError, KeyError) as e:
         print(f"      (reason: {e.__class__.__name__}: {e})")
@@ -998,10 +1054,14 @@ def match_category(genre_list):
         return None
     return min(votes.items(), key=lambda kv: (-kv[1], _CAT_RANK[kv[0]]))[0]
 
-def _is_close_vote(votes):
-    """True when the winning category only narrowly beat the runner-up (worth a second look)."""
-    counts = sorted(votes.values(), reverse=True)
-    return len(counts) >= 2 and counts[1] >= counts[0] - 1
+def _close_vote_alt(votes):
+    """The runner-up category when the vote was close enough to be worth a second look - lets the
+    review interface offer a straight choice between the two instead of silently picking the winner."""
+    if len(votes) < 2:
+        return None
+    ranked = sorted(votes.items(), key=lambda kv: (-kv[1], _CAT_RANK[kv[0]]))
+    (_, top_count), (second_cat, second_count) = ranked[0], ranked[1]
+    return second_cat if second_count >= top_count - 1 else None
 
 _genre_cache = {}
 
@@ -1018,7 +1078,7 @@ def resolve_genre(track, artist_genres):
     votes = _tag_votes(tags) if tags else {}
     cat = match_category(tags) if tags else None
     if cat:
-        result = (cat, tags, "Last.fm (track)", _is_close_vote(votes))
+        result = (cat, tags, "Last.fm (track)", _close_vote_alt(votes))
     else:
         # 2) Last.fm: MAIN ARTIST tags (obscure tracks rarely have track tags)
         atags = get_lastfm_artist_tags(main_artist)
@@ -1156,7 +1216,7 @@ def run_external_test():
     save_cache(force=True)
     print(f"\nBPMs and tags saved to {CACHE_FILE}: they will be reused by the real run.")
     print("Test finished - no Spotify API call was made." if not (still and SPOTIFY_TRACK_FALLBACK)
-          else "Test finished - only the track-info fallback touched the Spotify API.")
+        else "Test finished - only the track-info fallback touched the Spotify API.")
 
 def _norm(s):
     """Loose text normalisation (case, punctuation, version suffixes) used to compare titles/artists."""
@@ -1235,9 +1295,9 @@ def match_local_tracks(sp, tracks):
         # quota_exit() already saved the cache and printed its own message.
         quota_hit = True
         print(f"  ! Local-file matching stopped after {calls} search call(s) (quota) - {matched} matched so far;\n"
-              f"    the rest of the analysis still runs on what's available, and the remaining "
-              f"{sum(1 for t in locals_ if eligible(_cache['localmatch'].get(t.get('local_id') or t['id'])))} "
-              f"file(s) resume next run.", file=sys.stderr)
+            f"    the rest of the analysis still runs on what's available, and the remaining "
+            f"{sum(1 for t in locals_ if eligible(_cache['localmatch'].get(t.get('local_id') or t['id'])))} "
+            f"file(s) resume next run.", file=sys.stderr)
     save_cache(force=True)
     if not quota_hit:
         print(f"  * local match: {matched}/{len(locals_)} matched on the Spotify catalog ({calls} search calls this run)")
@@ -1390,10 +1450,50 @@ def gather_real_data(sp, user_id, display_name):
     print()
     return bpm_playlists, genre_playlists, contents, content_ids, source_tracks, tempos, measured_locally, artist_genres, year_contents
 
+def _local_file_uri(path):
+    """A file:// URI that works with webbrowser.open() on both Windows and Unix-like systems."""
+    abs_path = os.path.abspath(path).replace(os.sep, "/")
+    return "file:///" + abs_path if not abs_path.startswith("/") else "file://" + abs_path
+
+def open_review_interface(report_path=None, analysis_path=None):
+    """Opens review_interface.html (Review + Analysis tabs) in your browser with whichever of report_path/analysis_path exist already loaded."""
+    if not AUTO_OPEN_REVIEW:
+        return
+
+    own_path = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
+    script_dir = os.path.dirname(own_path)
+    template_path = os.path.join(script_dir, "review_interface.html")
+    if not os.path.exists(template_path):
+        print(f"(review_interface.html not found next to {os.path.basename(own_path)} in {script_dir} - skipping auto-open; place it there to enable this.)")
+        return
+    try:
+        with open(template_path, encoding="utf-8") as f:
+            html = f.read()
+        marker = "<script>\n"  # the page's single <script> block: inject just before it
+        if marker not in html:
+            print("(review_interface.html looks different than expected - skipping auto-open.)")
+            return
+        preload, loaded = "", []
+        for var_name, path, label in [("__PRELOADED_REPORT__", report_path, "report"), ("__PRELOADED_ANALYSIS__", analysis_path, "analysis")]:
+            if path and os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+                safe_json = text.replace("</", "<\\/")  # never let a track title/artist close our <script> early
+                preload += f"<script>window.{var_name} = {safe_json};</script>\n"
+                loaded.append(label)
+        rendered_path = os.path.join(OUTPUT_DIR, "review.html")
+        with open(rendered_path, "w", encoding="utf-8") as f:
+            f.write(html.replace(marker, preload + marker))
+        webbrowser.open(_local_file_uri(rendered_path))
+        print(f"  -> opened {rendered_path} in your browser (already loaded with this run's {' and '.join(loaded) or 'data'})")
+    except OSError as e:
+        print(f"(could not auto-open the review interface: {e})", file=sys.stderr)
+
 def load_tag_mappings():
     """Merges any tag -> category assignments from a previous decisions.json export straight into EXPLICIT_GENRE_MAP for this run,
     so a tag you pinned in the interface takes effect starting with the very next analysis."""
-    candidates = [DECISIONS_FILE, os.path.join(OUTPUT_DIR, DECISIONS_FILE), os.path.join(os.path.expanduser("~"), "Downloads", DECISIONS_FILE)]
+    candidates = [DECISIONS_FILE, os.path.join(OUTPUT_DIR, DECISIONS_FILE), os.path.join(DATA_DIR, DECISIONS_FILE),
+                os.path.join(os.path.expanduser("~"), "Downloads", DECISIONS_FILE)]
     for path in candidates:
         if os.path.exists(path):
             try:

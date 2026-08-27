@@ -131,44 +131,6 @@ def _track_label(t):
         return f"{t['name']} - {t['artists']}"
     return f"(unnamed track, id {t.get('id', '?')})"
 
-def open_review_interface(report_path):
-    """Opens review_interface.html in your browser with THIS run's report already loaded - no manual
-    "Load report.json" click needed. Looks for the template next to this script. This is a pure
-    convenience: any failure (template missing, no browser available) is reported on one line and
-    skipped, it never affects the analysis or its output files."""
-    if not AUTO_OPEN_REVIEW:
-        return
-
-    own_path = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
-    script_dir = os.path.dirname(own_path)
-    template_path = os.path.join(script_dir, "review_interface.html")
-    if not os.path.exists(template_path):
-        print(f"(review_interface.html not found next to {os.path.basename(own_path)} in {script_dir} - skipping auto-open; place it there to enable this.)")
-        return
-    try:
-        with open(template_path, encoding="utf-8") as f:
-            html = f.read()
-        with open(report_path, encoding="utf-8") as f:
-            report_text = f.read()
-        marker = "<script>\n"  # the review page's single <script> block: inject just before it
-        if marker not in html:
-            print("(review_interface.html looks different than expected - skipping auto-open.)")
-            return
-        safe_json = report_text.replace("</", "<\\/")  # never let a track title/artist close our <script> early
-        preload = f"<script>window.__PRELOADED_REPORT__ = {safe_json};</script>\n"
-        rendered_path = os.path.join(OUTPUT_DIR, "review.html")
-        with open(rendered_path, "w", encoding="utf-8") as f:
-            f.write(html.replace(marker, preload + marker))
-        webbrowser.open(_local_file_uri(rendered_path))
-        print(f"  -> opened {rendered_path} in your browser (already loaded with this run's report)")
-    except OSError as e:
-        print(f"(could not auto-open the review interface: {e})", file=sys.stderr)
-
-def _local_file_uri(path):
-    """A file:// URI that works with webbrowser.open() on both Windows and Unix-like systems."""
-    abs_path = os.path.abspath(path).replace(os.sep, "/")
-    return "file:///" + abs_path if not abs_path.startswith("/") else "file://" + abs_path
-
 MAX_TRACKS_PER_GROUP_IN_REPORT = 5000
 
 def export_report(actions, to_create_bpm, to_create_genre, path, unknown_genre_tags=None, unmapped_by_track=None):
@@ -196,10 +158,24 @@ def export_report(actions, to_create_bpm, to_create_genre, path, unknown_genre_t
                 # kind disambiguates the common case of the SAME track needing both a BPM and a genre action under the same uncertainty reason.
                 detail = f"-> {a['target']} ({a.get('kind', '?')})"
             else:
-                detail = f"-> {a.get('to_playlist_name', 'remove')}"
-                if a["type"] == "remove_duplicate" and a.get("total_copies"):
-                    detail += f" (extra copy, {a['total_copies']} total in this playlist)"
-            tracks.append({"id": a["track_id"], "title": a["track_name"], "artist": a["track_artist"], "detail": detail})
+                # These actions needs BOTH ends to make sense at a glance.
+                if a["type"] == "move_track":
+                    detail = f"{a['from_playlist_name']} -> {a['to_playlist_name']}"
+                elif a["type"] == "remove_duplicate":
+                    detail = f"{a['playlist_name']}: remove"
+                    if a.get("total_copies"):
+                        detail += f" (extra copy, {a['total_copies']} total)"
+                else:
+                    detail = f"-> {a.get('to_playlist_name', 'remove')}"
+            track = {"id": a["track_id"], "title": a["track_name"], "artist": a["track_artist"], "detail": detail}
+            if a["type"] == "follow_artist":
+                track["count"] = a.get("count", 0)
+            if a["type"] == "add_track":
+                track["target"] = a["target"]
+            if a.get("alt_target"):
+                # Lets the interface offer a straight toggle between the two instead of silently picking one.
+                track["alt_target"] = a["alt_target"]
+            tracks.append(track)
         review_groups.append({"id": gid, "label": label, "why": why, "total_count": len(acts), "tracks": tracks})
 
     _CATEGORY = {"genre_artist_tag": 0, "genre_itunes": 0, "genre_close_vote": 0, "genre_unclassifiable": 0, "misplaced_genre": 0,
@@ -267,25 +243,30 @@ def warn_if_stale(decisions):
         print("  re-run the analysis, reload review_interface.html, and export fresh decisions before continuing.\n")
 
 def load_decisions():
-    """Finds decisions.json: next to the script, in the report folder, or in your Downloads
+    """Finds decisions.json: next to the script, in the report folder, in .spotify_data, or in your Downloads
     (wherever review_interface.html's "Export decisions" button saved it)."""
-    candidates = [DECISIONS_FILE, os.path.join(OUTPUT_DIR, DECISIONS_FILE), os.path.join(os.path.expanduser("~"), "Downloads", DECISIONS_FILE)]
+    candidates = [DECISIONS_FILE, os.path.join(OUTPUT_DIR, DECISIONS_FILE), os.path.join(DATA_DIR, DECISIONS_FILE),
+                os.path.join(os.path.expanduser("~"), "Downloads", DECISIONS_FILE)]
     for path in candidates:
         if os.path.exists(path):
             print(f"Decisions loaded from: {path}\n")
             with open(path, encoding="utf-8") as f:
                 return json.load(f)
-    sys.exit(f"ERROR: no '{DECISIONS_FILE}' found next to the script, in {OUTPUT_DIR}/, or in Downloads.\n"
+    sys.exit(f"ERROR: no '{DECISIONS_FILE}' found next to the script, in {OUTPUT_DIR}/, in {DATA_DIR}/, or in Downloads.\n"
              f"Open review_interface.html, load {OUTPUT_DIR}/report.json, decide, click 'Export decisions',\n"
-             f"and make sure the downloaded file lands in one of those three places, then run --apply again.")
+             f"and make sure the downloaded file lands in one of those places, then run --apply again.")
 
 def filter_actions(actions, decisions):
     """Keeps: every CONFIDENT action; REVIEW actions per their group's approve/skip decision and sample-
     level exceptions; and only add actions whose target playlist's creation was actually approved."""
     approved_unlocks = {uid for uid, v in decisions.get("unlocks", {}).items() if v}
     review = decisions.get("review", {})
+    genre_choice = decisions.get("genre_choice", {})
     kept = []
     for a in actions:
+        # A close genre call redirected to its runner-up: alt_target always points at an EXISTING playlist
+        if a.get("alt_target") and genre_choice.get(a["track_id"]) == "alt":
+            a = {**a, "target": a["alt_target"], "needs_create": False, "unlock_id": None}
         if a.get("needs_create") and a.get("unlock_id") not in approved_unlocks:
             continue  # that playlist wasn't approved for creation - nothing to add it to (yet)
         if a["tier"] == "confident":
@@ -410,7 +391,7 @@ def suggest_artists_to_follow(sp, all_lib_tracks, actions, apply_mode):
             actions.append({"type": "follow_artist", "tier": "review", "group": "new_artist_follow",
                             "track_id": aid, "track_name": display_name,
                             "track_artist": f"{count} track{'s' if count != 1 else ''} in your library",
-                            "needs_create": False, "unlock_id": None})
+                            "needs_create": False, "unlock_id": None, "count": count})
         if not apply_mode:
             print(f"Artists you don't follow yet: {len(unfollowed)} (out of {len(artist_map)} in your library)\n")
 
@@ -489,16 +470,20 @@ def suggest_additions(source_tracks, tempos, bpm_playlists, genre_playlists, ids
             g_tok = ("=" if already else "+") + pname
             if aid and not already:
                 tier, group = local_tier or classify_genre(genre_src, close_vote)
+
+                # The runner-up only matters when it ALREADY has a real playlist.
+                alt_target = genre_playlists[close_vote]["name"] if close_vote and close_vote in genre_playlists else None
                 actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
-                                "track_artist": t["artists"], "target": pname, "needs_create": False, "unlock_id": None})
+                                "track_artist": t["artists"], "target": pname, "needs_create": False, "unlock_id": None, "alt_target": alt_target})
         else:
             genre_action = f"CREATE playlist '{genre}' then add this track [source: {genre_src}]"
             g_tok = f"NEW {genre}"
             to_create_genre[genre].append(_track_label(t))
             if aid:
                 tier, group = local_tier or classify_genre(genre_src, close_vote)
+                alt_target = genre_playlists[close_vote]["name"] if close_vote and close_vote in genre_playlists else None
                 actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
-                                "track_artist": t["artists"], "target": genre, "needs_create": True, "unlock_id": f"genre_{_slug(genre)}"})
+                                "track_artist": t["artists"], "target": genre, "needs_create": True, "unlock_id": f"genre_{_slug(genre)}", "alt_target": alt_target})
 
         loc = (" [LOCAL~Spotify]" if t.get("matched") else " [LOCAL]") if t.get("local") else (" [LIKED]" if t.get("liked") else "")
         tag = raw_genres[0] if raw_genres else ""
@@ -664,7 +649,8 @@ def dedupe_actions(actions):
         print(f"({len(actions) - len(deduped)} duplicate action(s) collapsed - same track, same destination)")
     return deduped
 
-def main(apply_mode=False):
+def _setup(apply_mode):
+    """Everything up to and including gather_real_data(): config, login, the one read of your library."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     problems = validate_config(require_spotify=not TEST_EXTERNES)
     if problems:
@@ -675,7 +661,7 @@ def main(apply_mode=False):
     if TEST_EXTERNES:   # test mode: ReccoBeats + Last.fm only, zero Spotify calls
         load_cache()
         run_external_test()
-        return
+        return None, None, None
     load_cache()
     sp = get_client(apply_mode)
     me = spotify_call(sp.current_user, "authentication")
@@ -686,7 +672,13 @@ def main(apply_mode=False):
         print("Per-track genre: Last.fm ACTIVE (primary source), Spotify artist as fallback\n")
     else:
         print("WARNING: LASTFM_API_KEY missing -> genre via Spotify artists only (free key: last.fm/account/create)\n")
-    bpm_playlists, genre_playlists, contents, playlist_id_by_name, source_tracks, tempos, measured_locally, artist_genres, year_contents = gather_real_data(sp, me["id"], me["display_name"])
+    gathered = gather_real_data(sp, me["id"], me["display_name"])
+    return sp, me, gathered
+
+def _run_sort(sp, gathered, apply_mode, auto_open=True):
+    """Everything after gather_real_data(), taking the already-fetched data as a parameter instead of fetching it itself.
+    Does not save the cache itself so a combined run can save it once, at the end."""
+    bpm_playlists, genre_playlists, contents, playlist_id_by_name, source_tracks, tempos, measured_locally, artist_genres, year_contents = gathered
 
     # per-playlist ID sets to test membership
     ids_in = {name: {t["id"] for t in lst} for name, lst in contents.items()}
@@ -726,7 +718,6 @@ def main(apply_mode=False):
 
     if apply_mode:
         apply_actions(sp, actions, to_create_bpm, to_create_genre, playlist_id_by_name)
-        save_cache(force=True)
         return
 
     # =====================================================================
@@ -750,9 +741,9 @@ def main(apply_mode=False):
     # is covering your WHOLE analysed library, not just this tool's sort queue - run that script for them.
     report_path = os.path.join(OUTPUT_DIR, "report.json")
     export_report(actions, to_create_bpm, to_create_genre, report_path, unknown_genre_tags, unmapped_by_track)
-    open_review_interface(report_path)
+    if auto_open:
+        open_review_interface(report_path, os.path.join(OUTPUT_DIR, "analysis.json"))
 
-    save_cache(force=True)
     print("\nDone. Nothing was modified on your account (dry-run).")
     if AUTO_OPEN_REVIEW:
         print("Next: in the review page that just opened, decide and export your decisions, then run")
@@ -760,6 +751,13 @@ def main(apply_mode=False):
     else:
         print("Next: open review_interface.html, load report.json, decide, export decisions.json,")
         print("      then run this script again with --apply to write the approved changes to Spotify.")
+
+def main(apply_mode=False):
+    sp, me, gathered = _setup(apply_mode)
+    if gathered is None:
+        return  # TEST_EXTERNES already ran its own diagnostic inside _setup - nothing further to do
+    _run_sort(sp, gathered, apply_mode)
+    save_cache(force=True)
 
 if __name__ == "__main__":
     apply_mode = "--apply" in sys.argv[1:]
@@ -774,6 +772,8 @@ if __name__ == "__main__":
         try:
             main(apply_mode=apply_mode)
         except SystemExit as e:
+            if isinstance(e.code, str):
+                print(e.code)   # sys.exit("some message") carries the message in e.code, not a print
             exit_code = e.code if isinstance(e.code, int) else (1 if e.code else 0)
         except Exception:
             import traceback

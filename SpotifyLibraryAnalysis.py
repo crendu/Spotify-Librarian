@@ -13,8 +13,8 @@ place so there is one CONFIG to edit regardless of which tool you run.
 
 HOW TO RUN
     python SpotifyLibraryAnalysis.py
-Writes rapport_spotify/analysis.json (open analysis.html and load it) and, if EXPORT_LIBRARY_BACKUP is
-on, rapport_spotify/5_library_backup.csv.
+Writes rapport_spotify/analysis.json and opens review_interface.html's Analysis tab for you and,
+if EXPORT_LIBRARY_BACKUP is on, rapport_spotify/5_library_backup.csv.
 """
 
 import csv
@@ -27,7 +27,10 @@ from datetime import datetime, timezone
 
 from SpotifyCore import *
 
-def main():
+def _setup():
+    """Everything up to and including gather_real_data(): config, login, the one read of your library.
+    Split out from main() so a combined run (SpotifyLibrarian.py's "both" option) can reuse the SAME data SpotifySortPlaylist._setup()
+    already fetched, instead of reading your library twice."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     problems = validate_config(require_spotify=True)
     if problems:
@@ -39,17 +42,24 @@ def main():
     sp = get_client(apply_mode=False)   # this tool never writes anything - always read-only scope
     me = spotify_call(sp.current_user, "authentication")
     print(f"Logged in as: {me['display_name']} ({me['id']})")
+    gathered = gather_real_data(sp, me["id"], me["display_name"])
+    return sp, me, gathered
 
-    bpm_playlists, genre_playlists, contents, playlist_id_by_name, source_tracks, tempos, measured_locally, artist_genres, year_contents = gather_real_data(sp, me["id"], me["display_name"])
+def _run_analysis(gathered, auto_open=True):
+    """Everything after gather_real_data(), taking the already-fetched data as a parameter.
+    So a combined run can save it once, at the end."""
+    bpm_playlists, genre_playlists, contents, playlist_id_by_name, source_tracks, tempos, measured_locally, artist_genres, year_contents = gathered
+
+    # The whole point of "analysis" is covering what you actually have, including tracks already correctly filed away long ago.
+    all_lib_tracks = {t["id"]: t for t in source_tracks}
+    for lst in contents.values():
+        for t in lst:
+            all_lib_tracks.setdefault(t["id"], t)
+    for lst in year_contents.values():
+        for t in lst:
+            all_lib_tracks.setdefault(t["id"], t)
 
     if EXPORT_LIBRARY_BACKUP:
-        all_lib_tracks = {t["id"]: t for t in source_tracks}
-        for lst in contents.values():
-            for t in lst:
-                all_lib_tracks.setdefault(t["id"], t)
-        for lst in year_contents.values():
-            for t in lst:
-                all_lib_tracks.setdefault(t["id"], t)
         backup_membership_sources = dict(contents)
         for year, lst in year_contents.items():
             backup_membership_sources[f"Top Songs {year}"] = lst
@@ -61,26 +71,52 @@ def main():
             w.writerows(build_library_backup_rows(all_lib_tracks, backup_membership_sources, tempos, artist_genres))
         print(f"  -> {path}")
 
-    export_analysis(source_tracks, tempos, artist_genres, year_contents, os.path.join(OUTPUT_DIR, "analysis.json"))
+    analysis_path = os.path.join(OUTPUT_DIR, "analysis.json")
+    export_analysis(list(all_lib_tracks.values()), tempos, artist_genres, year_contents, analysis_path)
+    if auto_open:
+        # review_interface.html now covers both tabs (Review + Analysis) - reuse the same opener, passing
+        # whichever report.json a previous sort run left behind too, so it isn't blank if you switch tabs.
+        open_review_interface(os.path.join(OUTPUT_DIR, "report.json"), analysis_path)
+    print("\nDone.")
+
+def main():
+    sp, me, gathered = _setup()
+    _run_analysis(gathered)
     save_cache(force=True)
-    print("\nDone. Open analysis.html and load analysis.json to see the trends.")
 
 def _distribution_stats(tracks, tempos, artist_genres):
-    """Genre split, BPM average/median/histogram, and top artists for a list of tracks - the same shape used for the overall library
-    and for each yearly playlist, so analysis.html can render both identically."""
+    """Genre split, BPM average/median/histogram, top artists, and a mood profile."""
     genre_counts = Counter()
     bpms = []
     bpm_bucket_counts = Counter()
     artist_counts = Counter()
+    mood_sums = defaultdict(lambda: {"energy": 0.0, "valence": 0.0, "danceability": 0.0, "acousticness": 0.0, "n": 0})
     for t in tracks:
         genre, _, _, _ = resolve_genre(t, artist_genres)
-        genre_counts[genre or "Inclassable"] += 1
+        cat = genre or "Inclassable"
+        genre_counts[cat] += 1
         tempo = tempos.get(t["id"])
         if tempo:
             bpms.append(tempo)
             bpm_bucket_counts[bpm_bucket(tempo)] += 1
         for _, aname in t.get("artist_pairs", []):
             artist_counts[aname] += 1
+        mood = _cache.get("mood", {}).get(t["id"])
+        if mood:
+            entry = mood_sums[cat]
+            for k in ("energy", "valence", "danceability", "acousticness"):
+                entry[k] += mood.get(k, 0)
+            entry["n"] += 1
+
+    mood_by_genre = {}
+    for cat, s in mood_sums.items():
+        n = s["n"]
+        mood_by_genre[cat] = {
+            "energy": round(s["energy"] / n, 3), "valence": round(s["valence"] / n, 3),
+            "danceability": round(s["danceability"] / n, 3), "acousticness": round(s["acousticness"] / n, 3),
+            "coverage": n, "of": genre_counts[cat],
+        }
+
     return {
         "track_count": len(tracks),
         "genre_counts": dict(genre_counts),
@@ -88,6 +124,7 @@ def _distribution_stats(tracks, tempos, artist_genres):
         "median_bpm": round(statistics.median(bpms), 1) if bpms else None,
         "bpm_histogram": dict(sorted(bpm_bucket_counts.items())),
         "top_artists": [{"name": n, "count": c} for n, c in artist_counts.most_common(8)],
+        "mood_by_genre": mood_by_genre,
     }
 
 def build_library_backup_rows(all_tracks, contents, tempos, artist_genres):
@@ -109,9 +146,9 @@ def build_library_backup_rows(all_tracks, contents, tempos, artist_genres):
     return rows
 
 def export_analysis(source_tracks, tempos, artist_genres, year_contents, path):
-    """Writes analysis.json for analysis.html: overall genre/BPM/artist distribution across the analysed
-    library, plus a per-year breakdown from any detected yearly recap playlists (opt-in via
-    ANALYZE_YEARLY_PLAYLISTS) - empty when that option is off, no separate gating needed here."""
+    """Writes analysis.json for review_interface.html's Analysis tab: verall genre/BPM/artist distribution across the analysed
+    library, plus a per-year breakdown from any detected yearly recap playlists (opt-in via ANALYZE_YEARLY_PLAYLISTS)
+    Empty when that option is off, no separate gating needed here."""
     overall = _distribution_stats(source_tracks, tempos, artist_genres)
     yearly = {str(year): _distribution_stats(tracks, tempos, artist_genres) for year, tracks in sorted(year_contents.items())}
     with open(path, "w", encoding="utf-8") as f:

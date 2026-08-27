@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sort Review — Spotify Playlist Sorter</title>
+<title>Spotify Librarian — Review &amp; Analysis</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%226%22%20fill%3D%22%2314120F%22/%3E%3Crect%20x%3D%226%22%20y%3D%2218%22%20width%3D%225%22%20height%3D%229%22%20rx%3D%221%22%20fill%3D%22%237FA66B%22/%3E%3Crect%20x%3D%2213.5%22%20y%3D%229%22%20width%3D%225%22%20height%3D%2218%22%20rx%3D%221%22%20fill%3D%22%23D9A441%22/%3E%3Crect%20x%3D%2221%22%20y%3D%2215%22%20width%3D%225%22%20height%3D%2212%22%20rx%3D%221%22%20fill%3D%22%237FA66B%22/%3E%3C/svg%3E">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
@@ -103,33 +103,12 @@ section{ margin-bottom:36px; }
   overflow:hidden;
 }
 .section-hint{ color:var(--text-dim); font-size:12px; margin:-6px 0 12px; line-height:1.5; }
-.unmapped-row{
-  display:flex; align-items:center; gap:14px; padding:10px 14px; background:var(--panel);
-  border:1px solid var(--hairline); border-radius:4px; margin-bottom:6px;
-}
-.unmapped-row .tag{ font-family:var(--mono); font-size:13px; color:var(--review); min-width:220px; }
-.unmapped-row .meta{ flex:1; color:var(--text-dim); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.unmapped-tags-context{ flex:1; color:var(--text-faint); font-size:11px; font-family:var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .unmapped-row select{
   background:var(--panel-raised); border:1px solid var(--hairline); color:var(--text); border-radius:3px;
   padding:6px 8px; font-size:12px; font-family:var(--sans); flex-shrink:0;
 }
 .unmapped-row select.pinned{ border-color:var(--review); color:var(--review); }
-.unmapped-track-block{
-  background:var(--panel); border:1px solid var(--hairline); border-radius:4px; margin-bottom:8px;
-  padding:10px 14px;
-}
-.unmapped-track-name{ font-weight:500; font-size:13px; margin-bottom:8px; color:var(--text); }
-.unmapped-tag-row{
-  display:flex; align-items:center; gap:14px; padding:6px 0; border-top:1px solid #2a261f;
-}
-.unmapped-tag-row:first-of-type{ border-top:none; padding-top:0; }
-.unmapped-tag-row .tag{ font-family:var(--mono); font-size:13px; color:var(--review); min-width:220px; }
-.unmapped-tag-row .meta{ flex:1; color:var(--text-faint); font-size:11px; }
-.unmapped-tag-row select{
-  background:var(--panel-raised); border:1px solid var(--hairline); color:var(--text); border-radius:3px;
-  padding:6px 8px; font-size:12px; font-family:var(--sans); flex-shrink:0;
-}
-.unmapped-tag-row select.pinned{ border-color:var(--review); color:var(--review); }
 .group-head{ padding:14px 16px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
 .group-head .meta{ flex:1; min-width:200px; }
 .group-head .reason{ font-size:14px; font-weight:500; }
@@ -193,6 +172,14 @@ section{ margin-bottom:36px; }
 .trow .tt b{ font-weight:500; }
 .trow .tt span{ color:var(--text-dim); }
 .trow .detail{ font-family:var(--mono); font-size:11px; color:var(--text-faint); white-space:nowrap; }
+.genre-toggle{ display:inline-flex; border:1px solid var(--hairline); border-radius:4px; overflow:hidden; }
+.gt-opt{
+  background:var(--panel); border:none; color:var(--text-faint); font-family:var(--mono); font-size:11px;
+  padding:3px 8px; cursor:pointer;
+}
+.gt-opt + .gt-opt{ border-left:1px solid var(--hairline); }
+.gt-opt.active{ background:var(--review-dim); color:var(--review); }
+.gt-opt:hover:not(.active){ color:var(--text); }
 .more-note{ padding:8px 4px 0; font-size:11px; color:var(--text-faint); font-style:italic; }
 
 footer{
@@ -203,6 +190,109 @@ footer{
 .footer-note{ font-size:12px; color:var(--text-dim); font-family:var(--mono); }
 
 .empty{ text-align:center; padding:40px 20px; color:var(--text-dim); font-size:13px; }
+
+/* ===== Analysis tab styles (merged in from the project's former separate analysis.html) ===== */
+
+
+*{ box-sizing:border-box; }
+body{
+  background:var(--void); color:var(--text); font-family:var(--sans); margin:0; padding:32px 24px 80px;
+  min-height:100vh;
+}
+
+
+
+
+.toolbar{ display:flex; align-items:center; gap:10px; margin:16px 0 24px; flex-wrap:wrap; }
+
+
+#fileInput{ display:none; }
+.source-label{ color:var(--text-faint); font-size:12px; font-family:var(--mono); }
+
+.tabs{ display:flex; gap:2px; border-bottom:1px solid var(--hairline); margin-bottom:24px; }
+.tab{
+  background:none; border:none; color:var(--text-dim); font-family:var(--sans); font-size:13px;
+  padding:10px 18px; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px;
+}
+.tab.active{ color:var(--text); border-bottom-color:var(--review); }
+.tab:hover:not(.active){ color:var(--text); }
+.panel{ display:none; }
+.panel.active{ display:block; }
+
+.card{
+  background:var(--panel); border:1px solid var(--hairline); border-radius:4px; padding:18px 20px;
+  margin-bottom:16px;
+}
+.side-by-side{ display:flex; gap:16px; }
+.side-by-side .card{ flex:1; min-width:0; }
+@media (max-width: 640px){ .side-by-side{ flex-direction:column; } }
+.card h2{ font-size:14px; font-weight:500; margin:0 0 4px; }
+.card .hint{ color:var(--text-faint); font-size:11px; margin-bottom:14px; }
+.stat-row{ display:flex; gap:28px; flex-wrap:wrap; margin-bottom:6px; }
+.stat{ }
+.stat .num{ font-family:var(--mono); font-size:22px; color:var(--review); font-weight:600; }
+.stat .lbl{ font-size:11px; color:var(--text-dim); margin-top:2px; }
+
+.bar-row{ display:flex; align-items:center; gap:10px; padding:4px 0; font-size:12px; }
+.bar-label{ width:110px; flex-shrink:0; color:var(--text-dim); text-align:right; font-family:var(--mono); }
+.bar-track{ flex:1; background:var(--panel-raised); border-radius:3px; height:16px; overflow:hidden; }
+.bar-fill{ display:block; height:100%; border-radius:3px; }
+.bar-value{ width:60px; flex-shrink:0; color:var(--text-faint); font-family:var(--mono); font-size:11px; }
+
+.artist-grid{ display:grid; grid-template-columns:1fr 1fr; gap:2px 24px; }
+.artist-item{
+  display:flex; justify-content:space-between; align-items:baseline; gap:8px;
+  padding:5px 0; border-bottom:1px solid var(--hairline); font-size:12px;
+}
+.artist-name{ color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.artist-count{ color:var(--text-faint); font-family:var(--mono); font-size:11px; flex-shrink:0; }
+@media (max-width: 480px){ .artist-grid{ grid-template-columns:1fr; } }
+
+.year-col{ display:flex; flex-direction:column; align-items:center; gap:6px; flex:1; min-width:0; }
+.year-stack{
+  width:100%; max-width:56px; height:220px; display:flex; flex-direction:column-reverse;
+  border-radius:3px; overflow:hidden; background:var(--panel-raised);
+}
+.year-seg{ width:100%; }
+.year-label{ font-family:var(--mono); font-size:11px; color:var(--text-dim); }
+.year-count{ font-family:var(--mono); font-size:10px; color:var(--text-faint); }
+.year-vibe{ display:flex; align-items:center; gap:4px; font-size:9px; color:var(--text-dim); margin-top:2px; white-space:nowrap; }
+.year-vibe-dot{ width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.years-row{ display:flex; gap:10px; align-items:flex-end; overflow-x:auto; padding-bottom:6px; }
+
+.legend{ display:flex; flex-wrap:wrap; gap:10px 16px; margin-top:14px; }
+.legend-item{ display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-dim); }
+.legend-swatch{ width:10px; height:10px; border-radius:2px; flex-shrink:0; }
+
+
+.th-tree{ font-family:var(--sans); font-size:15px; font-weight:500; fill:var(--text); }
+.ts-tree{ font-family:var(--sans); font-size:13px; fill:var(--text-dim); }
+.count-in-circle{ font-family:var(--mono); font-weight:600; fill:#fff; stroke:var(--void); stroke-width:2px; paint-order:stroke; }
+.mood-axis{ font-family:var(--sans); font-size:11px; fill:var(--text-faint); }
+.mood-label{ font-family:var(--sans); font-size:11px; fill:var(--text); }
+.receipt{
+  font-family:var(--mono); font-size:12px; line-height:1.6; color:var(--text); background:var(--void);
+  border:1px dashed var(--hairline); border-radius:2px; padding:18px 20px; max-width:360px;
+  white-space:pre-wrap; margin:0;
+}
+.aura-desc{ text-align:center; font-size:13px; color:var(--text-dim); margin-bottom:14px; }
+.aura-outer{
+  width:200px; height:200px; margin:0 auto; background:#fff; padding:10px 10px 26px;
+  border-radius:2px; box-shadow:0 6px 18px rgba(0,0,0,.45); overflow:hidden; box-sizing:border-box;
+}
+.aura-blob{ width:100%; height:100%; filter:blur(22px); transform:scale(1.3); border-radius:2px; }
+.aura-coverage{ text-align:center; font-size:10px; color:var(--text-faint); margin-top:10px; }
+
+/* ---------- top-level tabs (Review / Analysis) ---------- */
+.toptabs{ display:flex; gap:2px; border-bottom:1px solid var(--hairline); margin:20px 0 24px; }
+.toptab{
+  background:none; border:none; color:var(--text-dim); font-family:var(--sans); font-size:14px;
+  font-weight:500; padding:10px 20px; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px;
+}
+.toptab.active{ color:var(--text); border-bottom-color:var(--review); }
+.toptab:hover:not(.active){ color:var(--text); }
+.toppanel{ display:none; }
+.toppanel.active{ display:block; }
 </style>
 </head>
 <body>
@@ -210,7 +300,7 @@ footer{
 
   <header>
     <div class="title-block">
-      <h1>Sort Review</h1>
+      <h1>Spotify Librarian</h1>
       <div class="sub" id="sourceLabel">Preview with sample data — load your report to review the real thing</div>
     </div>
     <div class="header-actions">
@@ -219,6 +309,13 @@ footer{
       <button class="btn primary" id="exportBtn">Export decisions</button>
     </div>
   </header>
+
+  <div class="toptabs">
+    <button class="toptab active" data-toptab="review">Review</button>
+    <button class="toptab" data-toptab="analysis">Analysis</button>
+  </div>
+
+  <div class="toppanel active" id="toppanel-review">
 
   <div class="tally">
     <div class="ready"><div class="num" id="tallyReady">0</div><div class="lbl">Ready to apply</div></div>
@@ -246,11 +343,92 @@ footer{
 
   <section id="unmappedSection" style="display:none">
     <h2>Tags that matched nothing</h2>
-    <p class="section-hint">Last.fm/iTunes tags that never fit one of your categories. Pin one to a
-      category and it takes effect from your next analysis on - leave it on "Don't map" if it's not
-      really a genre (nationality, mood, popularity tier...).</p>
     <div id="unmappedWrap"></div>
   </section>
+
+  </div>
+
+  <div class="toppanel" id="toppanel-analysis">
+    <div class="toolbar">
+      <button class="btn primary" onclick="document.getElementById('analysisFileInput').click()">Load analysis.json</button>
+      <input type="file" id="analysisFileInput" accept=".json">
+      <span class="source-label" id="analysisSourceLabel">Showing demo data</span>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="overview">Overview</button>
+      <button class="tab" data-tab="yearly">By year</button>
+    </div>
+
+    <div class="panel active" id="panel-overview">
+      <div class="card">
+        <h2>Library snapshot</h2>
+        <div class="hint" id="overviewHint"></div>
+        <div class="stat-row">
+          <div class="stat"><div class="num" id="statTracks">0</div><div class="lbl">tracks analysed</div></div>
+          <div class="stat"><div class="num" id="statAvgBpm">–</div><div class="lbl">average bpm</div></div>
+          <div class="stat"><div class="num" id="statMedianBpm">–</div><div class="lbl">median bpm</div></div>
+          <div class="stat"><div class="num" id="statGenres">0</div><div class="lbl">genres represented</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Top artists</h2>
+        <div class="hint">By number of tracks in your analysed library</div>
+        <div id="artistBars"></div>
+      </div>
+      <div class="side-by-side">
+        <div class="card">
+          <h2>Genre distribution</h2>
+          <div class="hint">Share of your analysed library, by category</div>
+          <div id="genreBars"></div>
+        </div>
+        <div class="card">
+          <h2>Tempo distribution</h2>
+          <div class="hint">Tracks per 10 bpm bucket</div>
+          <div id="bpmBars"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Genre &amp; sub-genre map</h2>
+        <div class="hint">Category size = real track count in your library. Thin branches = keywords the script recognises for that category (not a real per-keyword count)</div>
+        <svg id="genreTree" width="100%" viewBox="0 0 1050 1050" role="img"><title>Genre and sub-genre map</title><desc>Categories sized by real track count, with recognised sub-genre keywords branching off each</desc></svg>
+      </div>
+      <div class="card">
+        <h2>Your Audio Aura</h2>
+        <div class="hint">A blend of your two biggest genres' own energy and mood, same idea as
+          Spotify's own yearly "Audio Aura" - not a competing product, just the same fun idea applied
+          to what this script already knows about your library.</div>
+        <div id="auraWrap"></div>
+      </div>
+      <div class="card" id="moodMapWrap">
+        <h2>Mood map</h2>
+        <div class="hint">Energy vs. mood (valence) by category, dot size = tracks with mood data. Only
+          covers tracks whose BPM came from ReccoBeats specifically - hover a dot to see its real coverage.</div>
+        <svg id="moodMap" width="100%" viewBox="0 0 560 420" role="img"><title>Mood map</title><desc>Genre categories plotted by average energy and valence</desc></svg>
+      </div>
+      <div class="card">
+        <h2>Your library, as a receipt</h2>
+        <div class="hint">No export-to-image yet (would need an extra library this project otherwise
+          avoids) - screenshot it, or print this page to PDF, if you want to keep a copy.</div>
+        <pre id="receiptWrap" class="receipt"></pre>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-yearly">
+      <div class="card" id="yearlyCard">
+        <h2>Genre mix by year</h2>
+        <div class="hint">From your own "top songs of the year" playlists — each bar is one year, stacked by genre share</div>
+        <div class="years-row" id="yearsRow"></div>
+        <div class="legend" id="yearlyLegend"></div>
+      </div>
+      <div class="card">
+        <h2>Average tempo by year</h2>
+        <div class="hint" id="yearlyBpmHint"></div>
+        <div id="yearlyBpmBars"></div>
+      </div>
+    </div>
+
+  </div>
 
 </div>
 
@@ -397,12 +575,19 @@ function escapeHtml(s){
 }
 
 const tagMapping = {};  // tag -> category the user picked, or absent/"" for "Don't map"
+const genreChoice = {}; // track_id -> "alt" when the runner-up genre was picked instead of the winner; absent = winner (default)
 
 function init(d){
   data = d;
   document.getElementById("confidentCount").textContent = d.confident_count.toLocaleString();
   data.review_groups.forEach(g => {
-    groupChecked[g.id] = new Map(g.tracks.map(t => [t.id, false]));
+    // Every other group defaults every track to unchecked - a deliberate "review before including"
+    // stance. Artist-follow is the one exception: an artist you already have 3+ tracks from is a much
+    // stronger, low-risk signal than a single track that could just be a one-off find, so those start
+    // pre-approved (still a genuine default, not a decision made for you - un-check any you'd rather skip).
+    const FOLLOW_PRECHECK_THRESHOLD = 3;
+    groupChecked[g.id] = new Map(g.tracks.map(t =>
+      [t.id, g.id === "new_artist_follow" ? (t.count || 0) >= FOLLOW_PRECHECK_THRESHOLD : false]));
     groupView[g.id] = {filter: "", sort: "title"};
   });
   renderUnlocks();
@@ -420,42 +605,86 @@ function renderUnmappedTags(){
   if(!tracks.length || !categories.length){ section.style.display = "none"; return; }
   section.style.display = "";
 
-  const selectsByTag = {};  // tag -> [<select> elements] - kept in sync so the same tag never shows two different picks
-  tracks.forEach(tr=>{
-    const block = document.createElement("div");
-    block.className = "unmapped-track-block";
-    const nameEl = document.createElement("div"); nameEl.className = "unmapped-track-name"; nameEl.textContent = tr.track;
-    block.appendChild(nameEl);
-    tr.tags.forEach(t=>{
-      const row = document.createElement("div");
-      row.className = "unmapped-tag-row";
-      const tagEl = document.createElement("span"); tagEl.className = "tag"; tagEl.textContent = `'${t.tag}'`;
-      const metaEl = document.createElement("span"); metaEl.className = "meta";
-      metaEl.textContent = `${t.count} track${t.count===1?"":"s"} total with this tag`;
-      const select = document.createElement("select");
-      const blank = document.createElement("option"); blank.value = ""; blank.textContent = "Don't map";
-      select.appendChild(blank);
-      categories.forEach(cat=>{
-        const opt = document.createElement("option"); opt.value = cat; opt.textContent = cat;
-        select.appendChild(opt);
-      });
-      select.value = tagMapping[t.tag] || "";
-      select.classList.toggle("pinned", !!select.value);
-      select.onchange = () => {
-        if(select.value) tagMapping[t.tag] = select.value; else delete tagMapping[t.tag];
-        // The same tag can appear under several tracks - keep every occurrence showing the same pick,
-        // since it is really one underlying decision (an EXPLICIT_GENRE_MAP entry), not one per track.
-        (selectsByTag[t.tag] || []).forEach(other=>{
-          other.value = select.value;
-          other.classList.toggle("pinned", !!select.value);
-        });
-      };
-      (selectsByTag[t.tag] = selectsByTag[t.tag] || []).push(select);
-      row.append(tagEl, metaEl, select);
-      block.appendChild(row);
+  const card = document.createElement("div");
+  card.className = "group";
+  card.innerHTML = `
+    <div class="group-head">
+      <div class="vu" title="Lights up as you pin tracks to a category">${Array.from({length:8},(_,i)=>`<i style="height:${6+i*1.3}px"></i>`).join("")}</div>
+      <div class="meta">
+        <div class="reason">Genre tags that matched nothing</div>
+        <div class="why">One dropdown per TRACK, not per tag - picking a category applies it to every
+          tag shown for that track. Leave a track on "Don't map" if none of its tags are really a genre
+          (nationality, mood, popularity tier...).</div>
+      </div>
+      <div class="count">${tracks.length.toLocaleString()} tracks</div>
+      <div class="group-actions">
+        <button class="gbtn expand">Show tracks (${tracks.length.toLocaleString()})</button>
+      </div>
+    </div>
+    <div class="tracklist" id="tl_unmapped"></div>`;
+  card.querySelector(".expand").onclick = () => toggleUnmappedExpand(card, tracks, categories);
+  wrap.appendChild(card);
+}
+
+let unmappedBuilt = false, unmappedFilter = "";
+
+function toggleUnmappedExpand(card, tracks, categories){
+  const panel = card.querySelector(".tracklist");
+  if(panel.classList.contains("open")){ panel.classList.remove("open"); return; }
+  panel.classList.add("open");
+  if(!unmappedBuilt){
+    unmappedBuilt = true;
+    panel.innerHTML = `
+      <div class="tl-toolbar">
+        <input type="text" class="tl-filter" placeholder="Filter by title or tag...">
+        <span class="tl-hint">Pick a category, or leave on "Don't map"</span>
+      </div>
+      <div class="tl-rows"></div>`;
+    panel.querySelector(".tl-filter").oninput = e => { unmappedFilter = e.target.value; renderUnmappedRows(panel, tracks, categories); };
+    renderUnmappedRows(panel, tracks, categories);
+  }
+}
+
+function renderUnmappedRows(panel, tracks, categories){
+  const rowsEl = panel.querySelector(".tl-rows");
+  const needle = unmappedFilter.trim().toLowerCase();
+  const list = !needle ? tracks
+    : tracks.filter(tr => `${tr.track} ${tr.tags.map(t=>t.tag).join(" ")}`.toLowerCase().includes(needle));
+
+  rowsEl.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  list.forEach(tr=>{
+    const row = document.createElement("div");
+    row.className = "trow unmapped-row";
+    const tt = document.createElement("span"); tt.className = "tt";
+    tt.innerHTML = `<b>${escapeHtml(tr.track)}</b>`;
+    const tagsEl = document.createElement("span"); tagsEl.className = "unmapped-tags-context";
+    tagsEl.textContent = tr.tags.map(t => `'${t.tag}'${t.count>1?` (${t.count} tracks)`:""}`).join(", ");
+    const select = document.createElement("select");
+    const blank = document.createElement("option"); blank.value = ""; blank.textContent = "Don't map";
+    select.appendChild(blank);
+    categories.forEach(cat=>{
+      const opt = document.createElement("option"); opt.value = cat; opt.textContent = cat;
+      select.appendChild(opt);
     });
-    wrap.appendChild(block);
+    // A track's several tags may already carry different picks from earlier per-tag choices (or from
+    // another track sharing one of the same tags) - shown here only if they all agree; otherwise this
+    // starts blank rather than guessing which one "wins".
+    const picks = new Set(tr.tags.map(t => tagMapping[t.tag] || ""));
+    select.value = picks.size === 1 ? [...picks][0] : "";
+    select.classList.toggle("pinned", !!select.value);
+    select.onchange = () => {
+      // One choice for the whole track: apply it to every tag shown here at once, rather than asking
+      // for a separate decision per tag on the same single song.
+      tr.tags.forEach(t => {
+        if(select.value) tagMapping[t.tag] = select.value; else delete tagMapping[t.tag];
+      });
+      select.classList.toggle("pinned", !!select.value);
+    };
+    row.append(tt, tagsEl, select);
+    frag.appendChild(row);
   });
+  rowsEl.appendChild(frag);
 }
 
 function renderUnlocks(){
@@ -571,7 +800,26 @@ function renderTrackRows(g){
     cb.onchange = ()=>{ map.set(t.id, cb.checked); recompute(); };
     const tt = document.createElement("span"); tt.className = "tt";
     tt.innerHTML = `<b>${escapeHtml(t.title)}</b> <span>— ${escapeHtml(t.artist)}</span>`;
-    const det = document.createElement("span"); det.className = "detail"; det.textContent = t.detail;
+    const det = document.createElement("span"); det.className = "detail";
+    if (t.alt_target) {
+      // Close genre call: a straight toggle between the winner and the runner-up, instead of silently
+      // picking one - stopPropagation so clicking a pill doesn't also toggle the row's own checkbox
+      // (this row is a <label> wrapping it).
+      const current = genreChoice[t.id] === "alt" ? "alt" : "primary";
+      det.innerHTML = `<span class="genre-toggle">
+        <button type="button" class="gt-opt${current==="primary"?" active":""}" data-choice="primary">${escapeHtml(t.target)}</button>
+        <button type="button" class="gt-opt${current==="alt"?" active":""}" data-choice="alt">${escapeHtml(t.alt_target)}</button>
+      </span>`;
+      det.querySelectorAll(".gt-opt").forEach(btn=>{
+        btn.onclick = (e) => {
+          e.preventDefault(); e.stopPropagation();
+          if (btn.dataset.choice === "alt") genreChoice[t.id] = "alt"; else delete genreChoice[t.id];
+          renderTrackRows(g);
+        };
+      });
+    } else {
+      det.textContent = t.detail;
+    }
     row.append(cb, tt, det);
     frag.appendChild(row);
   });
@@ -641,7 +889,7 @@ function buildDecisionsObject(){
     if(checkedIds.length >= uncheckedIds.length) review[g.id] = { default: "approved", exceptions: uncheckedIds };
     else review[g.id] = { default: "skipped", exceptions: checkedIds };
   });
-  return {generated_at: new Date().toISOString(), unlocks, review, tag_mappings: {...tagMapping}};
+  return {generated_at: new Date().toISOString(), unlocks, review, tag_mappings: {...tagMapping}, genre_choice: {...genreChoice}};
 }
 
 function exportDecisions(){
@@ -671,6 +919,450 @@ if (window.__PRELOADED_REPORT__) {
 } else {
   init(DEMO);
 }
+
+/* ===== Analysis tab logic (merged in from the project's former separate analysis.html) ===== */
+const GENRE_COLORS = { "Electro":"#4FB0C6", "Rap":"#9B7ED8", "Pop":"#D9A441", "Soul":"#E08E45",
+  "Dance":"#5FA8D3", "Française":"#7FA66B", "Reggae":"#6FBF73", "Latina":"#E0607E", "Jazz":"#C9A227",
+  "Classique":"#B5A8D6", "SoundTrack":"#8A8578", "Instrumental":"#A9A9A9", "Inclassable":"#5E584C"
+};
+function colorFor(g){ return GENRE_COLORS[g] || "#5E584C"; }
+
+const ANALYSIS_DEMO = {
+  generated_at: "demo",
+  overall: {
+    track_count: 4489,
+    genre_counts: {"Rock":1297,"Electro":901,"Rap":840,"Pop":793,"Française":378,"Soul":300,"Dance":210,
+                  "Reggae":142,"Latina":89,"SoundTrack":85,"Jazz":62,"Classique":51,"Instrumental":9},
+    avg_bpm: 118.4, median_bpm: 122.0,
+    bpm_histogram: {60:16,70:121,80:262,90:434,100:349,110:381,120:671,130:312,140:246,150:143,160:151,170:152,180:61,190:20,200:23},
+    top_artists: [{name:"Linkin Park",count:47},{name:"Daft Punk",count:31},{name:"Stromae",count:24},
+                 {name:"The Weeknd",count:22},{name:"Ed Sheeran",count:19},{name:"Bigflo & Oli",count:17}],
+    mood_by_genre: {
+      "Rock":{energy:0.78,valence:0.42,danceability:0.48,acousticness:0.08,coverage:640,of:1297},
+      "Electro":{energy:0.81,valence:0.55,danceability:0.72,acousticness:0.04,coverage:520,of:901},
+      "Rap":{energy:0.68,valence:0.48,danceability:0.71,acousticness:0.10,coverage:410,of:840},
+      "Pop":{energy:0.65,valence:0.62,danceability:0.68,acousticness:0.15,coverage:390,of:793},
+      "Française":{energy:0.52,valence:0.51,danceability:0.58,acousticness:0.30,coverage:180,of:378},
+      "Soul":{energy:0.45,valence:0.58,danceability:0.55,acousticness:0.35,coverage:150,of:300},
+      "Jazz":{energy:0.35,valence:0.53,danceability:0.42,acousticness:0.72,coverage:40,of:62},
+      "Classique":{energy:0.25,valence:0.38,danceability:0.20,acousticness:0.88,coverage:30,of:51}
+    }
+  },
+  yearly: {
+    "2018": {track_count:100, genre_counts:{"Pop":38,"Rap":25,"Rock":20,"Electro":10,"Soul":7}, avg_bpm:112.4, median_bpm:114.0, bpm_histogram:{}, top_artists:[],
+             mood_by_genre:{"Pop":{energy:0.45,valence:0.65,danceability:0.6,acousticness:0.2,coverage:20,of:38},"Rap":{energy:0.5,valence:0.4,danceability:0.65,acousticness:0.1,coverage:15,of:25}}},
+    "2019": {track_count:100, genre_counts:{"Pop":30,"Rap":32,"Rock":15,"Electro":15,"Soul":8}, avg_bpm:115.1, median_bpm:116.0, bpm_histogram:{}, top_artists:[],
+             mood_by_genre:{"Pop":{energy:0.48,valence:0.6,danceability:0.62,acousticness:0.18,coverage:18,of:30},"Rap":{energy:0.55,valence:0.42,danceability:0.68,acousticness:0.08,coverage:20,of:32}}},
+    "2020": {track_count:100, genre_counts:{"Pop":22,"Rap":35,"Rock":12,"Electro":22,"Soul":9}, avg_bpm:117.8, median_bpm:118.0, bpm_histogram:{}, top_artists:[],
+             mood_by_genre:{"Electro":{energy:0.7,valence:0.5,danceability:0.75,acousticness:0.04,coverage:14,of:22},"Rap":{energy:0.6,valence:0.4,danceability:0.7,acousticness:0.07,coverage:22,of:35}}},
+    "2021": {track_count:100, genre_counts:{"Pop":18,"Rap":30,"Rock":18,"Electro":28,"Soul":6}, avg_bpm:119.9, median_bpm:120.0, bpm_histogram:{}, top_artists:[],
+             mood_by_genre:{"Electro":{energy:0.75,valence:0.48,danceability:0.78,acousticness:0.03,coverage:18,of:28},"Rock":{energy:0.7,valence:0.38,danceability:0.5,acousticness:0.09,coverage:11,of:18}}},
+    "2022": {track_count:100, genre_counts:{"Pop":15,"Rap":28,"Rock":22,"Electro":30,"Soul":5}, avg_bpm:121.2, median_bpm:121.0, bpm_histogram:{}, top_artists:[],
+             mood_by_genre:{"Electro":{energy:0.78,valence:0.45,danceability:0.8,acousticness:0.03,coverage:19,of:30},"Rock":{energy:0.75,valence:0.35,danceability:0.48,acousticness:0.08,coverage:14,of:22}}},
+    "2023": {track_count:100, genre_counts:{"Pop":12,"Rap":24,"Rock":28,"Electro":32,"Soul":4}, avg_bpm:123.6, median_bpm:124.0, bpm_histogram:{}, top_artists:[],
+             mood_by_genre:{"Electro":{energy:0.8,valence:0.42,danceability:0.82,acousticness:0.02,coverage:21,of:32},"Rock":{energy:0.8,valence:0.32,danceability:0.45,acousticness:0.07,coverage:18,of:28}}},
+    "2024": {track_count:100, genre_counts:{"Pop":10,"Rap":20,"Rock":32,"Electro":34,"Soul":4}, avg_bpm:125.0, median_bpm:125.0, bpm_histogram:{}, top_artists:[],
+             mood_by_genre:{"Electro":{energy:0.82,valence:0.4,danceability:0.83,acousticness:0.02,coverage:22,of:34},"Rock":{energy:0.82,valence:0.3,danceability:0.42,acousticness:0.06,coverage:20,of:32}}}
+  }
+};
+
+let analysisData = ANALYSIS_DEMO;
+
+function initAnalysis(d){
+  analysisData = d;
+  document.getElementById("statTracks").textContent = analysisData.overall.track_count.toLocaleString();
+  document.getElementById("statAvgBpm").textContent = analysisData.overall.avg_bpm ?? "–";
+  document.getElementById("statMedianBpm").textContent = analysisData.overall.median_bpm ?? "–";
+  document.getElementById("statGenres").textContent = Object.keys(analysisData.overall.genre_counts).length;
+  renderBars("genreBars", sortedEntries(analysisData.overall.genre_counts), analysisData.overall.track_count, colorFor);
+  const bpmEntries = Object.entries(analysisData.overall.bpm_histogram || {}).map(([k,v])=>[`${k} bpm`, v]).sort((a,b)=>parseInt(a[0])-parseInt(b[0]));
+  renderBars("bpmBars", bpmEntries, analysisData.overall.track_count, ()=>"#D9A441");
+  const artistEntries = (analysisData.overall.top_artists||[]).map(a=>[a.name, a.count]);
+  renderArtistList("artistBars", artistEntries);
+  renderYearly();
+  renderGenreTree();
+  renderMoodMap();
+  renderReceipt();
+  renderAura();
+}
+
+function renderAura(){
+  const wrap = document.getElementById("auraWrap");
+  const moodByGenre = analysisData.overall.mood_by_genre || {};
+  const overall = moodSummary(moodByGenre);
+  if(!overall){
+    wrap.innerHTML = '<div class="empty">No mood data yet - only tracks whose BPM came from ReccoBeats specifically carry this (re-run to pick up more as the cache fills in).</div>';
+    return;
+  }
+  // A second tone from whichever category is FURTHEST from your overall average mood - not simply your
+  // biggest category, which usually IS close to the average (it's what pulled the average there in the
+  // first place) and would make the two gradient stops nearly identical instead of an actual blend.
+  let contrastCat = null, maxDist = -1;
+  Object.entries(moodByGenre).forEach(([cat, m])=>{
+    const dist = Math.hypot(m.energy - overall.energy, m.valence - overall.valence);
+    if(dist > maxDist){ maxDist = dist; contrastCat = m; }
+  });
+  const secondColor = contrastCat ? moodColor(contrastCat.valence, contrastCat.energy) : overall.color;
+
+  wrap.innerHTML = `
+    <div class="aura-desc">Your top music moods are <b style="color:${overall.color}">${overall.label}</b></div>
+    <div class="aura-outer"><div class="aura-blob" style="background:
+      radial-gradient(circle at 28% 25%, ${overall.color}, transparent 62%),
+      radial-gradient(circle at 72% 75%, ${secondColor}, transparent 62%),
+      ${overall.color};"></div></div>
+    <div class="aura-coverage">Based on ${overall.coverage.toLocaleString()} track(s) with mood data (ReccoBeats-sourced BPM only)</div>`;
+}
+
+function padDots(label, value, width){
+  const dots = ".".repeat(Math.max(1, width - label.length - value.length));
+  return label + dots + value;
+}
+
+function renderReceipt(){
+  const el = document.getElementById("receiptWrap");
+  const o = analysisData.overall;
+  const W = 34;
+  const lines = [];
+  lines.push("=".repeat(W));
+  lines.push(center("SPOTIFY LIBRARIAN", W));
+  lines.push(center("~ your library, itemised ~", W));
+  lines.push("=".repeat(W));
+  lines.push(padDots("Tracks analysed", o.track_count.toLocaleString(), W));
+  if(o.avg_bpm) lines.push(padDots("Average tempo", o.avg_bpm + " bpm", W));
+  if(o.median_bpm) lines.push(padDots("Median tempo", o.median_bpm + " bpm", W));
+  lines.push("-".repeat(W));
+  lines.push("TOP GENRES");
+  sortedEntries(o.genre_counts).slice(0, 5).forEach(([g,c], i)=>{
+    lines.push(padDots(`  ${i+1}. ${g}`, c.toLocaleString(), W));
+  });
+  lines.push("-".repeat(W));
+  lines.push("TOP ARTISTS");
+  (o.top_artists||[]).slice(0, 5).forEach((a, i)=>{
+    lines.push(padDots(`  ${i+1}. ${a.name}`, String(a.count), W));
+  });
+  const vibe = overallVibe(o.mood_by_genre || {});
+  if(vibe){
+    lines.push("-".repeat(W));
+    lines.push(padDots("VIBE", vibe, W));
+  }
+  lines.push("=".repeat(W));
+  lines.push(center("thank you for listening", W));
+  lines.push("=".repeat(W));
+  el.textContent = lines.join("\n");
+}
+
+function center(s, width){
+  const pad = Math.max(0, width - s.length);
+  const left = Math.floor(pad/2);
+  return " ".repeat(left) + s;
+}
+
+// Continuous energy/valence -> colour (bilinear blend between 4 mood corners) instead of 4 fixed
+// buckets - closer to Spotify's own "Audio Aura": a real gradient, not a jump between labels.
+const MOOD_CORNERS = {
+  calmSad:      [0x4A, 0x4E, 0x8C],
+  calmHappy:    [0x6F, 0xBF, 0x9C],
+  intenseSad:   [0xB5, 0x42, 0x3C],
+  intenseHappy: [0xE8, 0xA2, 0x3C],
+};
+function moodColor(valence, energy){
+  const v = Math.max(0, Math.min(1, valence)), e = Math.max(0, Math.min(1, energy));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const top = MOOD_CORNERS.intenseSad.map((c,i) => lerp(c, MOOD_CORNERS.intenseHappy[i], v));
+  const bottom = MOOD_CORNERS.calmSad.map((c,i) => lerp(c, MOOD_CORNERS.calmHappy[i], v));
+  const rgb = top.map((c,i) => Math.round(lerp(bottom[i], c, e)));
+  return `rgb(${rgb.join(",")})`;
+}
+
+const MOOD_WORDS = [ // checked top to bottom, first match wins
+  [0.55, 0.5, "confident and bold"],
+  [0.55, 0,   "intense and restless"],
+  [0,    0.5, "warm and easygoing"],
+  [0,    0,   "calm and wistful"],
+];
+function moodWords(valence, energy){
+  for(const [minE, minV, words] of MOOD_WORDS){
+    if(energy >= minE && valence >= minV) return words;
+  }
+  return "calm and wistful";
+}
+
+function weightedMood(moodByGenre){
+  // Track-weighted average across categories (coverage = how many tracks in that category actually
+  // have mood data) - a category with 5 measured tracks shouldn't count as much as one with 500.
+  let e = 0, v = 0, n = 0;
+  Object.values(moodByGenre || {}).forEach(m=>{
+    e += m.energy * m.coverage; v += m.valence * m.coverage; n += m.coverage;
+  });
+  return n ? { energy: e/n, valence: v/n, coverage: n } : null;
+}
+
+function moodSummary(moodByGenre){
+  const w = weightedMood(moodByGenre);
+  if(!w) return null;
+  return { label: moodWords(w.valence, w.energy), color: moodColor(w.valence, w.energy),
+           coverage: w.coverage, energy: w.energy, valence: w.valence };
+}
+
+function overallVibe(moodByGenre){
+  return moodSummary(moodByGenre)?.label || null;
+}
+
+function renderMoodMap(){
+  const svg = document.getElementById("moodMap");
+  const wrap = document.getElementById("moodMapWrap");
+  const moodByGenre = analysisData.overall.mood_by_genre || {};
+  const cats = Object.keys(moodByGenre);
+  if(!cats.length){
+    svg.innerHTML = "";
+    wrap.querySelector(".empty")?.remove();
+    const empty = document.createElement("div"); empty.className = "empty";
+    empty.textContent = "No mood data yet - only tracks whose BPM came from ReccoBeats specifically carry this (re-run to pick up more as the cache fills in).";
+    wrap.appendChild(empty);
+    return;
+  }
+  wrap.querySelector(".empty")?.remove();
+  const W = 560, H = 420, PAD = 50;
+  const x = v => PAD + v * (W - 2*PAD);           // valence: 0 (sad) -> 1 (happy), left to right
+  const y = v => (H - PAD) - v * (H - 2*PAD);     // energy: 0 (calm) -> 1 (intense), bottom to top - SVG y grows down
+
+  let svgHtml = `
+    <line x1="${PAD}" y1="${PAD}" x2="${PAD}" y2="${H-PAD}" stroke="var(--hairline)"/>
+    <line x1="${PAD}" y1="${H-PAD}" x2="${W-PAD}" y2="${H-PAD}" stroke="var(--hairline)"/>
+    <line x1="${x(0.5)}" y1="${PAD}" x2="${x(0.5)}" y2="${H-PAD}" stroke="var(--hairline)" stroke-dasharray="3,4"/>
+    <line x1="${PAD}" y1="${y(0.5)}" x2="${W-PAD}" y2="${y(0.5)}" stroke="var(--hairline)" stroke-dasharray="3,4"/>
+    <text x="${PAD}" y="${H-PAD+18}" class="mood-axis" text-anchor="start">sad</text>
+    <text x="${W-PAD}" y="${H-PAD+18}" class="mood-axis" text-anchor="end">happy</text>
+    <text x="${PAD-10}" y="${H-PAD}" class="mood-axis" text-anchor="end">calm</text>
+    <text x="${PAD-10}" y="${PAD+4}" class="mood-axis" text-anchor="end">intense</text>`;
+
+  cats.forEach(cat=>{
+    const m = moodByGenre[cat];
+    const r = Math.max(5, Math.min(22, 4 + Math.sqrt(m.of)));
+    const cx = x(m.valence), cy = y(m.energy);
+    svgHtml += `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r.toFixed(1)}" fill="${colorFor(cat)}" fill-opacity="0.85" stroke="var(--hairline)" stroke-width="0.5"><title>${cat}: energy ${m.energy}, valence ${m.valence} (${m.coverage}/${m.of} tracks with mood data)</title></circle>
+      <text x="${cx.toFixed(1)}" y="${(cy - r - 5).toFixed(1)}" class="mood-label" text-anchor="middle">${escapeHtml(cat)}</text>`;
+  });
+  svg.innerHTML = svgHtml;
+}
+
+const SUBGENRES = {
+  "Latina": ["reggaeton","salsa","bachata"], "Classique": ["baroque","opera","symphony"],
+  "Jazz": ["bebop","swing","bossa nova"], "Reggae": ["dancehall","ska","dub"],
+  "Rap": ["hip hop","trap","drill"], "Soul": ["r&b","funk","gospel"],
+  "Electro": ["house","techno","dubstep"], "Dance": ["disco","eurodance","hyperpop"],
+  "Rock": ["metal","punk","grunge"], "SoundTrack": ["film score","anime","ost"],
+  "Française": ["chanson","variété"], "Pop": ["indie","synthpop","folk"], "Instrumental": ["instrumental"],
+};
+
+function labelAttrs(angle, offset){
+  const cosA = Math.cos(angle), sinA = Math.sin(angle);
+  if (Math.abs(cosA) >= Math.abs(sinA)) {
+    const right = cosA > 0;
+    return { dx: right?offset:-offset, dy: 0, anchor: right?"start":"end", baseline:"0.35em" };
+  } else {
+    const below = sinA > 0;
+    return { dx: 0, dy: below?offset:-offset, anchor:"middle", baseline: below?"0.8em":"-0.1em" };
+  }
+}
+
+// Sub-genre labels sit further out ALONG THE SAME RAY as their dot (same angle, bigger radius) rather
+// than at a fixed horizontal/vertical offset from it. Centring each one's label over its own dot the
+// way category labels do would stack same-side neighbours (reggaeton/salsa/bachata...) at the same
+// height; a fixed left/right-plus-stagger offset helped but still collided on longer words or diagonal
+// clusters (hyperpop/eurodance, grunge/punk/metal). Following the ray instead needs no per-cluster
+// tuning: two dots that are angularly apart at all only get FURTHER apart moving outward along their
+// own diverging rays, however close together they started.
+function subLabelPos(cx, cy, angle, dist){
+  const x = cx + dist*Math.cos(angle), y = cy + dist*Math.sin(angle);
+  const right = Math.cos(angle) >= 0;
+  return { x, y, anchor: right?"start":"end", baseline:"0.35em" };
+}
+
+function renderGenreTree(){
+  const svgEl = document.getElementById("genreTree");
+  const counts = analysisData.overall.genre_counts || {};
+  const cats = Object.keys(SUBGENRES).filter(c => SUBGENRES[c]); // fixed order, stable layout run to run
+  if (!Object.keys(counts).length) { svgEl.innerHTML = ""; return; }
+  // Bigger canvas than a chat widget would allow: this is a persistent page, not width-locked to 680px,
+  // so there's room to space categories (and their sub-genre labels) further apart before they crowd
+  // their neighbours. Sized up again here specifically to fit larger label text without collisions -
+  // bigger text needs proportionally more room, not just a font-size bump.
+  const CX=525, CY=525, R0=44, R1=175, R2=350, N=cats.length;
+  const catR = c => 0.62*Math.sqrt(Math.max(c,1))+5;
+  const subR = (rank,total) => total>1 ? 8-rank*(4/(total-1)) : 7;
+  const text = (x,y,anchor,cls,content,dyBaseline,extra="") =>
+    `<text class="${cls}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" dy="${dyBaseline}" text-anchor="${anchor}" ${extra}>${escapeHtml(content)}</text>`;
+  const countFontSize = r => Math.max(9, Math.min(15, r*0.62)).toFixed(1);
+
+  let svg = '<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5"/></marker></defs>';
+  svg += `<circle cx="${CX}" cy="${CY}" r="${R0}" fill="var(--panel-raised)" stroke="var(--hairline)" stroke-width="0.5"/>`;
+  svg += text(CX, CY, "middle", "th-tree", "Your library", "0.35em");
+
+  cats.forEach((name,i)=>{
+    const count = counts[name] || 0;
+    const angle = (i/N)*2*Math.PI - Math.PI/2;
+    const cx = CX + R1*Math.cos(angle), cy = CY + R1*Math.sin(angle);
+    const r = catR(count);
+    svg += `<path d="M${(CX+R0*Math.cos(angle)).toFixed(1)} ${(CY+R0*Math.sin(angle)).toFixed(1)}L${cx.toFixed(1)} ${cy.toFixed(1)}" fill="none" stroke="var(--hairline)" stroke-width="${(1+r/10).toFixed(1)}"/>`;
+    // Tighter than before (was 0.75x the slice): each category's sub-genre fan now stays well inside
+    // its own angular slot, instead of reaching into a neighbouring category's space.
+    const spread = (2*Math.PI/N)*0.62;
+    (SUBGENRES[name]||[]).forEach((sub,j,arr)=>{
+      const t = arr.length>1 ? (j/(arr.length-1)-0.5) : 0;
+      const sa = angle + t*spread;
+      const sx = CX + R2*Math.cos(sa), sy = CY + R2*Math.sin(sa);
+      const sr = subR(j, arr.length);
+      const sPos = subLabelPos(CX, CY, sa, R2+sr+26);
+      svg += `<path d="M${cx.toFixed(1)} ${cy.toFixed(1)}L${sx.toFixed(1)} ${sy.toFixed(1)}" fill="none" stroke="var(--text-faint)" stroke-width="${(0.5+sr/12).toFixed(1)}"/>`;
+      svg += `<circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${sr.toFixed(1)}" fill="var(--text-faint)"/>`;
+      svg += text(sPos.x, sPos.y, sPos.anchor, "ts-tree", sub, sPos.baseline);
+    });
+    const cAttrs = labelAttrs(angle, r+16);
+    svg += `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r.toFixed(1)}" fill="${colorFor(name)}" stroke="var(--hairline)" stroke-width="0.5"/>`;
+    // Name beside the circle (4-zone placement, same as before); the real count now sits INSIDE the
+    // circle itself instead of appended to that label - white-on-colour with a dark stroke so it stays
+    // legible whichever category colour it lands on.
+    svg += text(cx+cAttrs.dx, cy+cAttrs.dy, cAttrs.anchor, "th-tree", name, cAttrs.baseline);
+    svg += text(cx, cy, "middle", "count-in-circle", String(count), "0.35em",
+               `style="font-size:${countFontSize(r)}px"`);
+  });
+  svgEl.innerHTML = svg;
+}
+
+function sortedEntries(obj){
+  return Object.entries(obj).sort((a,b)=>b[1]-a[1]);
+}
+
+function renderBars(elId, entries, total, colorFn){
+  const el = document.getElementById(elId);
+  el.innerHTML = "";
+  if(!entries.length){ el.innerHTML = '<div class="empty">No analysisData yet - run the script and load its report.</div>'; return; }
+  // Bar length is relative to the largest value in THIS list, so the chart reads as full rather than a
+  // row of near-empty slivers when a category is one of many (e.g. 13 genres, or a lot of artists) - the
+  // exact share is still given as a real percentage of the total in the text, not implied by the bar.
+  const max = Math.max(...entries.map(e=>e[1]), 1);
+  entries.forEach(([label, count])=>{
+    const width = count/max*100;
+    const row = document.createElement("div");
+    row.className = "bar-row";
+    row.innerHTML = `<span class="bar-label">${escapeHtml(label)}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${width.toFixed(1)}%;background:${colorFn(label)}"></span></span>
+      <span class="bar-value">${count.toLocaleString()}${total ? " ("+(count/total*100).toFixed(0)+"%)" : ""}</span>`;
+    el.appendChild(row);
+  });
+}
+
+function renderArtistList(elId, entries){
+  const el = document.getElementById(elId);
+  el.innerHTML = "";
+  if(!entries.length){ el.innerHTML = '<div class="empty">No analysisData yet - run the script and load its report.</div>'; return; }
+  // No bar, no percentage: in a library of any real size, any single artist is inherently a tiny sliver
+  // of the whole - true, but not worth a full-width bar or a "(1%)" repeated on every single row. A
+  // compact two-column list of name + count says the same thing without the visual weight.
+  const grid = document.createElement("div");
+  grid.className = "artist-grid";
+  entries.forEach(([name, count])=>{
+    const item = document.createElement("div");
+    item.className = "artist-item";
+    item.innerHTML = `<span class="artist-name">${escapeHtml(name)}</span><span class="artist-count">${count.toLocaleString()}</span>`;
+    grid.appendChild(item);
+  });
+  el.appendChild(grid);
+}
+
+function renderYearly(){
+  const years = Object.keys(analysisData.yearly || {}).sort();
+  const yearsRow = document.getElementById("yearsRow");
+  const legend = document.getElementById("yearlyLegend");
+  const bpmHint = document.getElementById("yearlyBpmHint");
+  yearsRow.innerHTML = "";
+  legend.innerHTML = "";
+  if(!years.length){
+    yearsRow.innerHTML = '<div class="empty">No yearly playlists detected - enable ANALYZE_YEARLY_PLAYLISTS and re-run to see this.</div>';
+    document.getElementById("yearlyBpmBars").innerHTML = "";
+    bpmHint.textContent = "";
+    return;
+  }
+  bpmHint.textContent = "From the same yearly playlists as above";
+  const allGenres = new Set();
+  years.forEach(y => Object.keys(analysisData.yearly[y].genre_counts||{}).forEach(g=>allGenres.add(g)));
+
+  years.forEach(y=>{
+    const yd = analysisData.yearly[y];
+    const total = yd.track_count || 1;
+    const col = document.createElement("div");
+    col.className = "year-col";
+    const stack = document.createElement("div");
+    stack.className = "year-stack";
+    sortedEntries(yd.genre_counts||{}).forEach(([g,c])=>{
+      const seg = document.createElement("div");
+      seg.className = "year-seg";
+      seg.style.height = (c/total*100).toFixed(1)+"%";
+      seg.style.background = colorFor(g);
+      seg.title = `${g}: ${c}`;
+      stack.appendChild(seg);
+    });
+    const lbl = document.createElement("div"); lbl.className = "year-label"; lbl.textContent = y;
+    const cnt = document.createElement("div"); cnt.className = "year-count"; cnt.textContent = yd.track_count+" tracks";
+    col.append(stack, lbl, cnt);
+    const vibe = moodSummary(yd.mood_by_genre);
+    if(vibe){
+      const badge = document.createElement("div"); badge.className = "year-vibe";
+      badge.innerHTML = `<span class="year-vibe-dot" style="background:${vibe.color}"></span>${vibe.label}`;
+      badge.title = `Based on ${vibe.coverage} track(s) with mood data this year`;
+      col.appendChild(badge);
+    }
+    yearsRow.appendChild(col);
+  });
+
+  [...allGenres].sort().forEach(g=>{
+    const item = document.createElement("div"); item.className = "legend-item";
+    item.innerHTML = `<span class="legend-swatch" style="background:${colorFor(g)}"></span>${escapeHtml(g)}`;
+    legend.appendChild(item);
+  });
+
+  const bpmEntries = years.filter(y=>analysisData.yearly[y].avg_bpm != null).map(y=>[y, analysisData.yearly[y].avg_bpm]);
+  renderBars("yearlyBpmBars", bpmEntries, 0, ()=>"#D9A441");
+}
+
+document.querySelectorAll(".tab").forEach(tab=>{
+  tab.onclick = ()=>{
+    document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
+    document.querySelectorAll(".panel").forEach(p=>p.classList.remove("active"));
+    tab.classList.add("active");
+    document.getElementById("panel-"+tab.dataset.tab).classList.add("active");
+  };
+});
+
+document.getElementById("analysisFileInput").onchange = (e)=>{
+  const file = e.target.files[0]; if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ()=>{
+    try{
+      const parsed = JSON.parse(reader.result);
+      document.getElementById("analysisSourceLabel").textContent = "Loaded: " + file.name;
+      initAnalysis(parsed);
+    }catch(err){ alert("Could not read this file as JSON: " + err.message); }
+  };
+  reader.readAsText(file);
+};
+
+if (window.__PRELOADED_ANALYSIS__) {
+  document.getElementById("analysisSourceLabel").textContent = "Loaded automatically from your last analysis run";
+  initAnalysis(window.__PRELOADED_ANALYSIS__);
+} else {
+  initAnalysis(ANALYSIS_DEMO);
+}
+
+document.querySelectorAll(".toptab").forEach(tab=>{
+  tab.onclick = ()=>{
+    document.querySelectorAll(".toptab").forEach(t=>t.classList.remove("active"));
+    document.querySelectorAll(".toppanel").forEach(p=>p.classList.remove("active"));
+    tab.classList.add("active");
+    document.getElementById("toppanel-"+tab.dataset.toptab).classList.add("active");
+  };
+});
 </script>
 </body>
 <!--
