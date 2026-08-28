@@ -1,0 +1,26 @@
+# Secrets and session data, and the project's local memory (BPMs, tags, local-file matches, playlist snapshots)
+# all live in .spotify_data/ now, out of the way of your source files.
+# If a real secret ever ends up in a commit anyway, treat it as compromised: rotate the key/secret, deleting
+# the file afterwards does NOT remove it from git history.
+.spotify_data/
+
+# Generated reports and your review decisions - regenerate them anytime by re-running the script.
+rapport_spotify/
+decisions.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# PyInstaller build output - a compiled binary, not source; rebuild anytime from SpotifyLibrarian.py (see README).
+# Also baked-in with your real CONFIG values at compile time, so it should never be shared or committed regardless.
+*.exe
+build/
+dist/
+*.spec
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
