@@ -48,7 +48,7 @@ def _setup():
 def _run_analysis(gathered, auto_open=True):
     """Everything after gather_real_data(), taking the already-fetched data as a parameter.
     So a combined run can save it once, at the end."""
-    bpm_playlists, genre_playlists, contents, playlist_id_by_name, source_tracks, tempos, measured_locally, artist_genres, year_contents = gathered
+    bpm_playlists, genre_playlists, contents, playlist_id_by_name, source_tracks, tempos, measured_locally, artist_genres, year_contents, _source_name = gathered
 
     # The whole point of "analysis" is covering what you actually have, including tracks already correctly filed away long ago.
     all_lib_tracks = {t["id"]: t for t in source_tracks}
@@ -105,7 +105,9 @@ def _distribution_stats(tracks, tempos, artist_genres):
         if mood:
             entry = mood_sums[cat]
             for k in ("energy", "valence", "danceability", "acousticness"):
-                entry[k] += mood.get(k, 0)
+                v = mood.get(k)
+                if v is not None:
+                    entry[k] += v
             entry["n"] += 1
 
     mood_by_genre = {}

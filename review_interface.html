@@ -282,6 +282,11 @@ body{
 }
 .aura-blob{ width:100%; height:100%; filter:blur(22px); transform:scale(1.3); border-radius:2px; }
 .aura-coverage{ text-align:center; font-size:10px; color:var(--text-faint); margin-top:10px; }
+.aura-yearly-row{ display:flex; flex-wrap:wrap; gap:20px; justify-content:center; }
+.aura-mini{ display:flex; flex-direction:column; align-items:center; width:110px; }
+.aura-mini-year{ font-family:var(--mono); font-size:12px; color:var(--text); margin-bottom:8px; }
+.aura-outer-sm{ width:90px; height:90px; padding:6px 6px 14px; }
+.aura-mini-mood{ text-align:center; font-size:10px; margin-top:8px; line-height:1.3; }
 
 /* ---------- top-level tabs (Review / Analysis) ---------- */
 .toptabs{ display:flex; gap:2px; border-bottom:1px solid var(--hairline); margin:20px 0 24px; }
@@ -425,6 +430,12 @@ body{
         <h2>Average tempo by year</h2>
         <div class="hint" id="yearlyBpmHint"></div>
         <div id="yearlyBpmBars"></div>
+      </div>
+      <div class="card" id="yearlyAuraCard">
+        <h2>Audio Aura by year</h2>
+        <div class="hint">The same idea as "Your Audio Aura" above, one blend per year - same coverage
+          caveat: only tracks whose BPM came from ReccoBeats specifically carry mood data.</div>
+        <div class="aura-yearly-row" id="yearlyAuraWrap"></div>
       </div>
     </div>
 
@@ -984,33 +995,58 @@ function initAnalysis(d){
   renderMoodMap();
   renderReceipt();
   renderAura();
+  renderYearlyAuras();
 }
 
-function renderAura(){
-  const wrap = document.getElementById("auraWrap");
-  const moodByGenre = analysisData.overall.mood_by_genre || {};
+function auraGradient(moodByGenre){
+  // A second tone from whichever category is FURTHEST from the average mood - not simply the biggest
+  // category, which usually IS close to the average (it's what pulled the average there in the first
+  // place) and would make the two gradient stops nearly identical instead of an actual blend. Shared by
+  // the global aura and each year's own mini-aura, so both read the exact same way.
   const overall = moodSummary(moodByGenre);
-  if(!overall){
-    wrap.innerHTML = '<div class="empty">No mood data yet - only tracks whose BPM came from ReccoBeats specifically carry this (re-run to pick up more as the cache fills in).</div>';
-    return;
-  }
-  // A second tone from whichever category is FURTHEST from your overall average mood - not simply your
-  // biggest category, which usually IS close to the average (it's what pulled the average there in the
-  // first place) and would make the two gradient stops nearly identical instead of an actual blend.
+  if(!overall) return null;
   let contrastCat = null, maxDist = -1;
   Object.entries(moodByGenre).forEach(([cat, m])=>{
     const dist = Math.hypot(m.energy - overall.energy, m.valence - overall.valence);
     if(dist > maxDist){ maxDist = dist; contrastCat = m; }
   });
   const secondColor = contrastCat ? moodColor(contrastCat.valence, contrastCat.energy) : overall.color;
+  return { overall, gradient: `radial-gradient(circle at 28% 25%, ${overall.color}, transparent 62%),
+      radial-gradient(circle at 72% 75%, ${secondColor}, transparent 62%), ${overall.color}` };
+}
+
+function renderAura(){
+  const wrap = document.getElementById("auraWrap");
+  const moodByGenre = analysisData.overall.mood_by_genre || {};
+  const built = auraGradient(moodByGenre);
+  if(!built){
+    wrap.innerHTML = '<div class="empty">No mood data yet - only tracks whose BPM came from ReccoBeats specifically carry this (re-run to pick up more as the cache fills in).</div>';
+    return;
+  }
+  const { overall, gradient } = built;
 
   wrap.innerHTML = `
     <div class="aura-desc">Your top music moods are <b style="color:${overall.color}">${overall.label}</b></div>
-    <div class="aura-outer"><div class="aura-blob" style="background:
-      radial-gradient(circle at 28% 25%, ${overall.color}, transparent 62%),
-      radial-gradient(circle at 72% 75%, ${secondColor}, transparent 62%),
-      ${overall.color};"></div></div>
+    <div class="aura-outer"><div class="aura-blob" style="background:${gradient};"></div></div>
     <div class="aura-coverage">Based on ${overall.coverage.toLocaleString()} track(s) with mood data (ReccoBeats-sourced BPM only)</div>`;
+}
+
+function renderYearlyAuras(){
+  const wrap = document.getElementById("yearlyAuraWrap");
+  const card = document.getElementById("yearlyAuraCard");
+  const years = Object.keys(analysisData.yearly || {}).sort();
+  if(!years.length){ card.style.display = "none"; return; }
+  card.style.display = "";
+  wrap.innerHTML = years.map(y=>{
+    const built = auraGradient(analysisData.yearly[y].mood_by_genre || {});
+    if(!built) return `<div class="aura-mini"><div class="aura-mini-year">${y}</div><div class="empty" style="padding:20px 0;font-size:11px">No mood data</div></div>`;
+    const { overall, gradient } = built;
+    return `<div class="aura-mini">
+        <div class="aura-mini-year">${y}</div>
+        <div class="aura-outer aura-outer-sm"><div class="aura-blob" style="background:${gradient};"></div></div>
+        <div class="aura-mini-mood" style="color:${overall.color}">${overall.label}</div>
+      </div>`;
+  }).join("");
 }
 
 function padDots(label, value, width){
@@ -1057,34 +1093,61 @@ function center(s, width){
   return " ".repeat(left) + s;
 }
 
-// Continuous energy/valence -> colour (bilinear blend between 4 mood corners) instead of 4 fixed
-// buckets - closer to Spotify's own "Audio Aura": a real gradient, not a jump between labels.
-const MOOD_CORNERS = {
-  calmSad:      [0x4A, 0x4E, 0x8C],
-  calmHappy:    [0x6F, 0xBF, 0x9C],
-  intenseSad:   [0xB5, 0x42, 0x3C],
-  intenseHappy: [0xE8, 0xA2, 0x3C],
-};
-function moodColor(valence, energy){
-  const v = Math.max(0, Math.min(1, valence)), e = Math.max(0, Math.min(1, energy));
-  const lerp = (a, b, t) => a + (b - a) * t;
-  const top = MOOD_CORNERS.intenseSad.map((c,i) => lerp(c, MOOD_CORNERS.intenseHappy[i], v));
-  const bottom = MOOD_CORNERS.calmSad.map((c,i) => lerp(c, MOOD_CORNERS.calmHappy[i], v));
-  const rgb = top.map((c,i) => Math.round(lerp(bottom[i], c, e)));
-  return `rgb(${rgb.join(",")})`;
+// The circumplex model of affect (Russell, 1980): mood plotted as a position on a wheel - valence
+// (sad<->happy) as the horizontal axis, energy (calm<->intense) as the vertical one, centred on
+// neutral (0.5, 0.5) - rather than a flat blend between 4 fixed corners. Where you land on that wheel
+// gives BOTH the word (nearest of 8 named moods, evenly spread around it, not just 4 quadrant buckets)
+// AND the colour (hue rotates continuously around the same wheel; how far from dead-centre you are sets
+// how vivid vs. muted it is) - the two axes genuinely compared against each other, not read separately.
+const MOOD_WHEEL = [
+  { angle:   0, label: "happy",   hue:  48 },
+  { angle:  45, label: "excited", hue:  25 },
+  { angle:  90, label: "tense",   hue: 355 },
+  { angle: 135, label: "anxious", hue: 315 },
+  { angle: 180, label: "sad",     hue: 250 },
+  { angle: 225, label: "bored",   hue: 205 },
+  { angle: 270, label: "calm",    hue: 165 },
+  { angle: 315, label: "content", hue:  95 },
+];
+
+function moodAngleDeg(valence, energy){
+  // dx: right = happier. dy: up = more energetic - atan2's own convention already treats positive y as
+  // "up"/90 degrees, so energy needs no sign flip here (there's no screen/SVG coordinate involved yet).
+  const dx = valence - 0.5, dy = energy - 0.5;
+  let deg = Math.atan2(dy, dx) * 180 / Math.PI;
+  return deg < 0 ? deg + 360 : deg;
 }
 
-const MOOD_WORDS = [ // checked top to bottom, first match wins
-  [0.55, 0.5, "confident and bold"],
-  [0.55, 0,   "intense and restless"],
-  [0,    0.5, "warm and easygoing"],
-  [0,    0,   "calm and wistful"],
-];
+function moodMagnitude(valence, energy){
+  // 0 at dead-centre (a genuinely neutral, unremarkable mood) to 1 at the wheel's edge (as strongly
+  // felt as this scale allows) - drives how vivid the colour is, independently of which direction it's in.
+  return Math.min(1, Math.hypot(valence - 0.5, energy - 0.5) / 0.5);
+}
+
+function moodColor(valence, energy){
+  const deg = moodAngleDeg(valence, energy);
+  const mag = moodMagnitude(valence, energy);
+  const n = MOOD_WHEEL.length, step = 360 / n;
+  const idx = deg / step;
+  const i0 = Math.floor(idx) % n, i1 = (i0 + 1) % n;
+  const t = idx - Math.floor(idx);
+  let dh = MOOD_WHEEL[i1].hue - MOOD_WHEEL[i0].hue;
+  if (dh > 180) dh -= 360; else if (dh < -180) dh += 360;   // shortest way around the wheel, not through 0
+  const hue = (MOOD_WHEEL[i0].hue + dh * t + 360) % 360;
+  const sat = 28 + mag * 47;    // near-neutral grey close to centre, fully saturated at the edge
+  const light = 58 - mag * 16;  // a bit darker/richer the more strongly the mood is felt
+  return `hsl(${hue.toFixed(0)}, ${sat.toFixed(0)}%, ${light.toFixed(0)}%)`;
+}
+
 function moodWords(valence, energy){
-  for(const [minE, minV, words] of MOOD_WORDS){
-    if(energy >= minE && valence >= minV) return words;
-  }
-  return "calm and wistful";
+  const deg = moodAngleDeg(valence, energy);
+  let best = MOOD_WHEEL[0], bestDiff = 360;
+  MOOD_WHEEL.forEach(pt=>{
+    let diff = Math.abs(deg - pt.angle);
+    if (diff > 180) diff = 360 - diff;
+    if (diff < bestDiff){ bestDiff = diff; best = pt; }
+  });
+  return best.label;
 }
 
 function weightedMood(moodByGenre){

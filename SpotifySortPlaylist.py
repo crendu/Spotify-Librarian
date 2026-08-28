@@ -50,7 +50,7 @@ REVIEW_GROUPS = {
     "local_fuzzy_match":    ("Local file matched by a loose search",
                              "The title/artist tags in the file looked unusual, so the catalog match is less certain."),
     "misplaced_genre":      ("Genre disagrees with where you put it",
-                            "A second opinion on your own curation, not a verdict - your placement may well be the right one."),
+                             "A second opinion on your own curation, not a verdict - your placement may well be the right one."),
     "new_artist_follow":    ("Artist in your library you don't follow yet",
                              "Following helps Spotify's recommendations and keeps you notified of new releases."),
 }
@@ -93,6 +93,14 @@ def classify_bpm(t, tempo, measured_locally):
     if not _corroborate_bpm(t["id"], tempo, t["artists"], t["name"]):
         return "review", "bpm_disagreement"
     return "confident", None
+
+def _row_key(a):
+    """A key that uniquely identifies ONE ROW in the review interface."""
+    if a["type"] == "remove_duplicate":
+        return f"{a['track_id']}::{a['playlist_name']}::{a.get('position', '')}"
+    if a["type"] == "move_track":
+        return f"{a['track_id']}::{a['from_playlist_name']}"
+    return a["track_id"]
 
 def classify_genre(genre_src, close_vote):
     """(tier, group) for a genre-based add/move, from the precision of its source."""
@@ -141,7 +149,7 @@ def export_report(actions, to_create_bpm, to_create_genre, path, unknown_genre_t
         if a["tier"] == "confident" and a.get("needs_create") and a.get("unlock_id"):
             confident_gated[a["unlock_id"]] += 1
     unlocks = ([{"id": f"bpm_{b}", "label": f"{b} bpm", "count": len(v), "confident": confident_gated[f"bpm_{b}"]} for b, v in sorted(to_create_bpm.items())]
-              + [{"id": f"genre_{_slug(g)}", "label": g, "count": len(v), "confident": confident_gated[f"genre_{_slug(g)}"]} for g, v in sorted(to_create_genre.items())])
+            + [{"id": f"genre_{_slug(g)}", "label": g, "count": len(v), "confident": confident_gated[f"genre_{_slug(g)}"]} for g, v in sorted(to_create_genre.items())])
     confident_count = sum(1 for a in actions if a["tier"] == "confident" and not a.get("needs_create"))
     by_group = defaultdict(list)
     for a in actions:
@@ -156,7 +164,8 @@ def export_report(actions, to_create_bpm, to_create_genre, path, unknown_genre_t
                 detail = "Follow"
             elif a["type"] == "add_track":
                 # kind disambiguates the common case of the SAME track needing both a BPM and a genre action under the same uncertainty reason.
-                detail = f"-> {a['target']} ({a.get('kind', '?')})"
+                origin = f"{a['from_playlist_name']}: " if a.get("from_playlist_name") else ""
+                detail = f"{origin}-> {a['target']} ({a.get('kind', '?')})"
             else:
                 # These actions needs BOTH ends to make sense at a glance.
                 if a["type"] == "move_track":
@@ -167,7 +176,7 @@ def export_report(actions, to_create_bpm, to_create_genre, path, unknown_genre_t
                         detail += f" (extra copy, {a['total_copies']} total)"
                 else:
                     detail = f"-> {a.get('to_playlist_name', 'remove')}"
-            track = {"id": a["track_id"], "title": a["track_name"], "artist": a["track_artist"], "detail": detail}
+            track = {"id": _row_key(a), "title": a["track_name"], "artist": a["track_artist"], "detail": detail}
             if a["type"] == "follow_artist":
                 track["count"] = a.get("count", 0)
             if a["type"] == "add_track":
@@ -194,8 +203,8 @@ def export_report(actions, to_create_bpm, to_create_genre, path, unknown_genre_t
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "confident_count": confident_count,
-                   "unlocks": unlocks, "review_groups": review_groups, "unmapped_tracks": unmapped_tracks, "categories": categories},
-                   f, ensure_ascii=False, indent=2)
+                "unlocks": unlocks, "review_groups": review_groups, "unmapped_tracks": unmapped_tracks, "categories": categories},
+                f, ensure_ascii=False, indent=2)
     print(f"  -> {path} ({confident_count} confident, {sum(g['total_count'] for g in review_groups)} to review)")
 
 def _parse_iso(ts):
@@ -247,14 +256,19 @@ def load_decisions():
     (wherever review_interface.html's "Export decisions" button saved it)."""
     candidates = [DECISIONS_FILE, os.path.join(OUTPUT_DIR, DECISIONS_FILE), os.path.join(DATA_DIR, DECISIONS_FILE),
                 os.path.join(os.path.expanduser("~"), "Downloads", DECISIONS_FILE)]
-    for path in candidates:
-        if os.path.exists(path):
-            print(f"Decisions loaded from: {path}\n")
-            with open(path, encoding="utf-8") as f:
-                return json.load(f)
-    sys.exit(f"ERROR: no '{DECISIONS_FILE}' found next to the script, in {OUTPUT_DIR}/, in {DATA_DIR}/, or in Downloads.\n"
-             f"Open review_interface.html, load {OUTPUT_DIR}/report.json, decide, click 'Export decisions',\n"
-             f"and make sure the downloaded file lands in one of those places, then run --apply again.")
+    existing = [p for p in candidates if os.path.exists(p)]
+    if not existing:
+        sys.exit(f"ERROR: no '{DECISIONS_FILE}' found next to the script, in {OUTPUT_DIR}/, in {DATA_DIR}/, or in Downloads.\n"
+                 f"Open review_interface.html, load {OUTPUT_DIR}/report.json, decide, click 'Export decisions',\n"
+                 f"and make sure the downloaded file lands in one of those places, then run --apply again.")
+    path = max(existing, key=os.path.getmtime)
+    if len(existing) > 1:
+        others = ", ".join(p for p in existing if p != path)
+        print(f"Decisions loaded from: {path} (most recently modified - also found, but older, at: {others})\n")
+    else:
+        print(f"Decisions loaded from: {path}\n")
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 def filter_actions(actions, decisions):
     """Keeps: every CONFIDENT action; REVIEW actions per their group's approve/skip decision and sample-
@@ -265,7 +279,7 @@ def filter_actions(actions, decisions):
     kept = []
     for a in actions:
         # A close genre call redirected to its runner-up: alt_target always points at an EXISTING playlist
-        if a.get("alt_target") and genre_choice.get(a["track_id"]) == "alt":
+        if a.get("alt_target") and genre_choice.get(_row_key(a)) == "alt":
             a = {**a, "target": a["alt_target"], "needs_create": False, "unlock_id": None}
         if a.get("needs_create") and a.get("unlock_id") not in approved_unlocks:
             continue  # that playlist wasn't approved for creation - nothing to add it to (yet)
@@ -274,7 +288,9 @@ def filter_actions(actions, decisions):
             continue
         grp = review.get(a["group"], {})
         default, exceptions = grp.get("default", "skipped"), set(grp.get("exceptions", []))
-        included = (a["track_id"] not in exceptions) if default == "approved" else (a["track_id"] in exceptions)
+
+        # Matched by the SAME per-row key used to build report.json (see _row_key).
+        included = (_row_key(a) not in exceptions) if default == "approved" else (_row_key(a) in exceptions)
         if included:
             kept.append(a)
     return kept
@@ -395,8 +411,8 @@ def suggest_artists_to_follow(sp, all_lib_tracks, actions, apply_mode):
         if not apply_mode:
             print(f"Artists you don't follow yet: {len(unfollowed)} (out of {len(artist_map)} in your library)\n")
 
-def suggest_additions(source_tracks, tempos, bpm_playlists, genre_playlists, ids_in, measured_locally,
-                      artist_genres, actions, to_create_bpm, to_create_genre, unknown_genre_tags, unmapped_by_track, apply_mode):
+def suggest_additions(source_tracks, tempos, bpm_playlists, genre_playlists, ids_in, measured_locally, artist_genres, actions,
+                    to_create_bpm, to_create_genre, unknown_genre_tags, unmapped_by_track, apply_mode, source_name):
     """Section 1: for every source-playlist track, works out its BPM and genre destination (existing
     playlist, a new one, or - genre only - the "Inclassable" catch-all when nothing matched at all),
     appends the resulting add_track action(s) to `actions`, and returns the CSV rows for
@@ -424,14 +440,14 @@ def suggest_additions(source_tracks, tempos, bpm_playlists, genre_playlists, ids
             if aid and not already:
                 tier, group = local_tier or classify_bpm(t, tempo, measured_locally)
                 actions.append({"type": "add_track", "kind": "bpm", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
-                                "track_artist": t["artists"], "target": pname, "needs_create": False, "unlock_id": None})
+                                "track_artist": t["artists"], "target": pname, "needs_create": False, "unlock_id": None, "from_playlist_name": source_name})
         else:
             bpm_action = f"CREATE playlist '{bucket} bpm' then add this track"
             to_create_bpm[bucket].append(_track_label(t))
             if aid:
                 tier, group = local_tier or classify_bpm(t, tempo, measured_locally)
                 actions.append({"type": "add_track", "kind": "bpm", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
-                                "track_artist": t["artists"], "target": f"{bucket} bpm", "needs_create": True, "unlock_id": f"bpm_{bucket}"})
+                                "track_artist": t["artists"], "target": f"{bucket} bpm", "needs_create": True, "unlock_id": f"bpm_{bucket}", "from_playlist_name": source_name})
 
         alts = []
         if SHOW_HALF_DOUBLE_TEMPO and tempo:
@@ -456,12 +472,12 @@ def suggest_additions(source_tracks, tempos, bpm_playlists, genre_playlists, ids
                     if not already:
                         actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid,
                                         "track_name": t["name"], "track_artist": t["artists"], "target": pname,
-                                        "needs_create": False, "unlock_id": None})
+                                        "needs_create": False, "unlock_id": None, "from_playlist_name": source_name})
                 else:
                     to_create_genre[INCLASSABLE].append(_track_label(t))
                     actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid,
                                     "track_name": t["name"], "track_artist": t["artists"], "target": INCLASSABLE,
-                                    "needs_create": True, "unlock_id": f"genre_{_slug(INCLASSABLE)}"})
+                                    "needs_create": True, "unlock_id": f"genre_{_slug(INCLASSABLE)}", "from_playlist_name": source_name})
         elif genre in genre_playlists:
             pname = genre_playlists[genre]["name"]
             already = t["id"] in ids_in.get(pname, set())
@@ -473,8 +489,9 @@ def suggest_additions(source_tracks, tempos, bpm_playlists, genre_playlists, ids
 
                 # The runner-up only matters when it ALREADY has a real playlist.
                 alt_target = genre_playlists[close_vote]["name"] if close_vote and close_vote in genre_playlists else None
-                actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
-                                "track_artist": t["artists"], "target": pname, "needs_create": False, "unlock_id": None, "alt_target": alt_target})
+                actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid,
+                                "track_name": t["name"], "track_artist": t["artists"], "target": pname, "needs_create": False,
+                                "unlock_id": None, "alt_target": alt_target, "from_playlist_name": source_name})
         else:
             genre_action = f"CREATE playlist '{genre}' then add this track [source: {genre_src}]"
             g_tok = f"NEW {genre}"
@@ -482,8 +499,9 @@ def suggest_additions(source_tracks, tempos, bpm_playlists, genre_playlists, ids
             if aid:
                 tier, group = local_tier or classify_genre(genre_src, close_vote)
                 alt_target = genre_playlists[close_vote]["name"] if close_vote and close_vote in genre_playlists else None
-                actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid, "track_name": t["name"],
-                                "track_artist": t["artists"], "target": genre, "needs_create": True, "unlock_id": f"genre_{_slug(genre)}", "alt_target": alt_target})
+                actions.append({"type": "add_track", "kind": "genre", "tier": tier, "group": group, "track_id": aid,
+                                "track_name": t["name"], "track_artist": t["artists"], "target": genre, "needs_create": True,
+                                "unlock_id": f"genre_{_slug(genre)}", "alt_target": alt_target, "from_playlist_name": source_name})
 
         loc = (" [LOCAL~Spotify]" if t.get("matched") else " [LOCAL]") if t.get("local") else (" [LIKED]" if t.get("liked") else "")
         tag = raw_genres[0] if raw_genres else ""
@@ -623,7 +641,7 @@ def list_playlists_to_create(to_create_bpm, to_create_genre, apply_mode):
         print("4) PLAYLISTS TO CREATE (suggestion)")
         print("=" * 100)
     for label, kind, pending in ([(f"{b} bpm", "BPM", to_create_bpm[b]) for b in sorted(to_create_bpm)]
-                                 + [(g, "Genre", to_create_genre[g]) for g in sorted(to_create_genre)]):
+                                + [(g, "Genre", to_create_genre[g]) for g in sorted(to_create_genre)]):
         if not apply_mode:
             print(f"- '{label}': {len(pending)} pending track(s)")
             for x in pending:
@@ -655,8 +673,8 @@ def _setup(apply_mode):
     problems = validate_config(require_spotify=not TEST_EXTERNES)
     if problems:
         sys.exit("The script cannot start: something in the CONFIG block needs fixing.\n\n  * "
-                 + "\n\n  * ".join(problems)
-                 + "\n\nFix the line(s) above in the CONFIG block at the top of the file, save, and run again.")
+                + "\n\n  * ".join(problems)
+                + "\n\nFix the line(s) above in the CONFIG block at the top of the file, save, and run again.")
     load_tag_mappings()
     if TEST_EXTERNES:   # test mode: ReccoBeats + Last.fm only, zero Spotify calls
         load_cache()
@@ -678,7 +696,7 @@ def _setup(apply_mode):
 def _run_sort(sp, gathered, apply_mode, auto_open=True):
     """Everything after gather_real_data(), taking the already-fetched data as a parameter instead of fetching it itself.
     Does not save the cache itself so a combined run can save it once, at the end."""
-    bpm_playlists, genre_playlists, contents, playlist_id_by_name, source_tracks, tempos, measured_locally, artist_genres, year_contents = gathered
+    bpm_playlists, genre_playlists, contents, playlist_id_by_name, source_tracks, tempos, measured_locally, artist_genres, year_contents, source_name = gathered
 
     # per-playlist ID sets to test membership
     ids_in = {name: {t["id"] for t in lst} for name, lst in contents.items()}
@@ -699,8 +717,8 @@ def _run_sort(sp, gathered, apply_mode, auto_open=True):
     to_create_genre = defaultdict(list)     # {genre: [tracks]} -> Genre playlists to create
     unknown_genre_tags = defaultdict(list)  # {raw genre/tag: [tracks]} unmapped
     unmapped_by_track = []                  # [{"track": label, "tags": [t1, t2, ...]}] - one entry per track, for the interface
-    rows_add = suggest_additions(source_tracks, tempos, bpm_playlists, genre_playlists, ids_in, measured_locally,
-                                 artist_genres, actions, to_create_bpm, to_create_genre, unknown_genre_tags, unmapped_by_track, apply_mode)
+    rows_add = suggest_additions(source_tracks, tempos, bpm_playlists, genre_playlists, ids_in, measured_locally, artist_genres,
+                                actions, to_create_bpm, to_create_genre, unknown_genre_tags, unmapped_by_track, apply_mode, source_name)
 
     rows_misplaced = find_misplaced_tracks(bpm_playlists, genre_playlists, contents, tempos, artist_genres, actions, apply_mode)
 

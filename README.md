@@ -193,7 +193,10 @@ the official BPM/audio endpoints can't see them - but their name and artist tags
 cascade (Last.fm, Deezer, iTunes) work anyway. A loosely-tagged rip that crams `"Artist - Title"` into just
 the title field (artist tag left blank) gets that split back out automatically - guarded to a dash with
 spaces on both sides specifically, so a genuine one-word title like "Self-Control" is never touched, and a
-correctly-tagged file is never second-guessed. With `MATCH_LOCAL_FILES` on, the script also searches the
+correctly-tagged file is never second-guessed. This heals retroactively too: a playlist already cached from
+before this fix existed would otherwise carry the unsplit "?" forever, since an unchanged playlist skips
+re-parsing entirely - the fix runs once on the cached data itself the next time it's loaded, no need to
+clear anything by hand. With `MATCH_LOCAL_FILES` on, the script also searches the
 Spotify catalog for each one's equivalent, trying up to three query shapes per file (normal fields, swapped
 fields for inverted MP3 tags, then free text) - a match makes the track fully actionable for a future
 "apply changes" step. Matches and misses are both cached, so this search is only ever paid once per file.
@@ -224,10 +227,16 @@ be sorted):
   recognises for that category, not a measured per-keyword count).
 - **Mood map** - energy vs. mood (valence), one dot per genre category, sized by how many of its tracks
   carry mood data.
-- **Your Audio Aura** - a blurred two-colour gradient in the same spirit as Spotify's own yearly feature:
-  one colour from your overall mood, the other from whichever category is furthest from that average (your
-  single biggest category almost always looks close to the average - it's what pulled it there - so it
-  wouldn't make for much of a *blend*).
+- **Your Audio Aura** - a blurred two-colour gradient in the same spirit as Spotify's own yearly feature.
+  The mood itself comes from a real circumplex model of affect (Russell, 1980): energy and valence plotted
+  as an angle around a wheel, centred on neutral, rather than a flat quadrant lookup - the angle picks the
+  nearest of 8 named moods (happy, excited, tense, anxious, sad, bored, calm, content) and drives a
+  continuously rotating colour, muted near the centre and vivid the more strongly a mood is felt. The
+  aura's second colour comes from whichever category is furthest from your overall average (your single
+  biggest category almost always looks close to the average - it's what pulled it there - so it wouldn't
+  make for much of a *blend*).
+- **Audio Aura by year** - the same wheel, one small aura per year, in the **By year** tab - a quick visual
+  read on how your mood evolved, not just your genres or tempo.
 - **A receipt-style summary** - top genres and artists, tempo, and an overall "vibe" line, styled like an
   itemised till receipt. No export-to-image (that would need an extra library this project otherwise
   avoids) - screenshot it, or print the page to PDF, if you want to keep a copy.
@@ -378,12 +387,18 @@ A plain run is always read-only. To actually change your library, there are thre
    or destination). Checkboxes are literal: checked means that track will be included, full stop. "Approve
    all" / "Leave out" just check or uncheck everything in the group at once; you can still flip any
    individual track afterwards. A small VU-meter on each group fills up live as you include its tracks, so
-   you can see your progress at a glance. Decide which not-yet-existing playlists (140 bpm, SoundTrack...)
-   are worth creating. Click "Export decisions" - this downloads `decisions.json` to your Downloads folder.
+   you can see your progress at a glance - a track that legitimately appears on more than one row of the
+   same group (duplicated across two playlists, say) is tracked separately per row, so the meter reaches a
+   genuine 100% and a decision on one occurrence never silently applies to the other. Decide which
+   not-yet-existing playlists (140 bpm, SoundTrack...) are worth creating. Click "Export decisions" - this
+   downloads `decisions.json` to your Downloads folder.
 3. **Apply** - `python SpotifySortPlaylist.py --apply` (or `python SpotifyLibrarian.py sort --apply`). It
    re-checks your library fresh (fast, thanks to the cache), applies your decisions, and shows a **full
    preview** of every playlist to create, track to add, move, or remove - grouped and counted. Nothing is
-   written until you type `yes` at the single confirmation prompt that follows.
+   written until you type `yes` at the single confirmation prompt that follows. If more than one
+   `decisions.json` turns up (script folder, report folder, `.spotify_data`, Downloads), the most recently
+   modified one is used, not just the first found - so a fresh export sitting in a lower-priority folder is
+   never shadowed by a stale one sitting in a higher-priority one.
 
 Before the preview, `--apply` also tells you how long ago the decisions were exported and, if a newer
 `report.json` has been generated since (say you re-ran the analysis after exporting), flags it clearly.
@@ -409,11 +424,12 @@ already-applied changes are recognised as done and skipped, nothing is ever doub
 In the review interface, two things that look like duplicated rows at a glance are intentional: a track
 needing both a BPM and a genre decision under the same uncertainty reason shows as two lines, each labelled
 `(bpm)` / `(genre)`; a track with 3+ copies in one playlist shows one line per extra copy, each saying how
-many copies exist in total. A moved or removed track always names both playlists involved (`Rap -> Pop`,
-`Française: remove`) rather than a bare `-> Pop` that never said where the track currently sits. Review
-groups are also sorted by category first (genre, then BPM, then duplicates, then local-file matches, then
-artist-follows), by size within each - not just by raw size across everything, which used to interleave
-unrelated categories.
+many copies exist in total. Every row names the playlist(s) involved - a moved or removed track names both
+ends (`Rap -> Pop`, `Française: remove`), and a track being added straight from the sort queue names that
+source playlist too (`Setlist: -> 130 bpm (bpm)`) - never a bare `-> Pop` that doesn't say where the track
+currently sits. Review groups are also sorted by category first (genre, then BPM, then duplicates, then
+local-file matches, then artist-follows), by size within each - not just by raw size across everything,
+which used to interleave unrelated categories.
 
 ## Troubleshooting
 
@@ -435,10 +451,21 @@ unrelated categories.
   cover playlist creation/editing yet. The script now detects this itself and deletes the stale login so
   Spotify re-asks (your browser reopens) - if it still happens, delete `.spotify_data\.spotify_token_cache`
   by hand and run again.
-- **Deezer (or ReccoBeats) consistently returns 0 results** - usually a proxy/certificate issue rather than
-  Deezer itself being down: test a single well-known query (e.g. "Bohemian Rhapsody") outside the main
-  script with your `PROXY_URL` and `truststore` set up the same way, to see the raw response or the real
-  underlying error.
+- **Deezer (or ReccoBeats) consistently returns 0 results** - the script now tells the two apart on its
+  own where it can. A batch that comes back "successful" (2xx) but empty several times in a row prints the
+  raw response once, so a proxy silently returning an empty body instead of actually failing doesn't look
+  identical to a genuinely obscure batch of tracks. A hard connection failure (`ConnectionError`,
+  `ConnectTimeout`...) shows up as an explicit error rather than a silent 0. In practice this is how a real
+  outage on ReccoBeats' own end (a Cloudflare Tunnel error, nothing to do with this project or your network)
+  got told apart from a local proxy/certificate problem in about a minute, instead of guessing between the
+  two - if you see one, check whether the service itself is reachable in a browser before assuming it's
+  your setup.
+- **Local tempo analysis (`ANALYZE_DEEZER_PREVIEWS`) takes forever and measures 0** - every download/analysis
+  failure used to collapse to a silent "couldn't measure this one", indistinguishable from 1000 unrelated
+  misses. It now prints a one-line summary of what actually went wrong (`1450 preview download/analysis
+  failure(s): download:ConnectTimeout x1420, ...`) - a single dominant reason across hundreds of tracks
+  points at something systemic (a proxy timing out on every download, say) worth fixing before running this
+  stage again, rather than just being slow for no visible reason.
 - **Quota exhausted** - the exit message tells you exactly when to retry when Spotify provides a
   `Retry-After` value (the short-burst limit always does); the daily quota usually doesn't, in which case
   the first refusal each day is remembered so a later run the same day gives a real estimate based on

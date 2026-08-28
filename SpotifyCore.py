@@ -401,7 +401,7 @@ def spotify_call(fn, context, attempts=4):
                     print(f"  ! Spotify rate-limit on {context} -> pausing {short}s (attempt {attempt}/{attempts - 1}, looks like a short burst, not the daily quota)", file=sys.stderr)
                     time.sleep(short)
                     continue
-                quota_exit(context, retry_after, headers)
+                quota_exit(context, retry_after)
             raise
         except requests.exceptions.RequestException as e:
             if attempt == attempts:
@@ -531,7 +531,22 @@ def get_playlist_tracks(sp, playlist_id, snapshot_id=None):
     global _cache_dirty
     cached = _cache["playlists"].get(playlist_id)
     if cached and snapshot_id and cached.get("snapshot_id") == snapshot_id:
-        return [dict(t) for t in cached["tracks"]]  # copies: runtime mutations must never leak into the cache
+        tracks = [dict(t) for t in cached["tracks"]]  # copies: runtime mutations must never leak into the cache
+
+        # A cache hit skips _parse_playlist_items entirely. Healed here instead, once, so it doesn't need clearing the cache by hand.
+        healed = 0
+        for t in tracks:
+            if t.get("local") and t.get("artists") == "?":
+                guessed_artist, guessed_name = _split_artist_title(t.get("name", ""))
+                if guessed_artist:
+                    t["artists"], t["name"] = guessed_artist, guessed_name
+                    t["id"] = f"local::{guessed_artist.lower()}::{guessed_name.lower()}"
+                    healed += 1
+        if healed:
+            print(f"  * healed {healed} local file name(s) cached before artist/title splitting existed")
+            cached["tracks"] = [dict(t) for t in tracks]
+            _cache_dirty += 1
+        return tracks
 
     # 1) new /items endpoint (post-migration) - pages parsed on the fly; network retries are BOUNDED (spotify_call)
     #    and a partially-read playlist is never cached (complete flag).
@@ -633,11 +648,12 @@ def get_my_playlists(sp):
     return fetch_all(sp, first, "playlist listing")
 
 _reccobeats_failures = 0
+_reccobeats_empty_streak = 0
 
 def _reccobeats_get(endpoint, ids):
     """One ReccoBeats request with retries; honours "slow down" (429) answers.
     After 3 failed batches in a row the script stops calling ReccoBeats for this run (the cache keeps what was fetched)."""
-    global _reccobeats_failures
+    global _reccobeats_failures, _reccobeats_empty_streak
     if _reccobeats_failures >= 3:
         return None
     url = RECCOBEATS_URL.rsplit("/", 1)[0] + "/" + endpoint
@@ -654,7 +670,18 @@ def _reccobeats_get(endpoint, ids):
                 continue
             r.raise_for_status()
             _reccobeats_failures = 0
-            return r.json().get("content", [])
+            content = r.json().get("content", [])
+            if content:
+                _reccobeats_empty_streak = 0
+            else:
+                _reccobeats_empty_streak += 1
+                # A "successful" (2xx) response with zero results is unusual enough to be worth a closer look.
+                if _reccobeats_empty_streak == 3:
+                    snippet = r.text[:200].replace("\n", " ")
+                    print(f"     ! ReccoBeats: {_reccobeats_empty_streak} batches in a row came back empty despite a "
+                          f"successful ({r.status_code}) response, {len(r.content)} byte(s) - raw start: {snippet!r}",
+                          file=sys.stderr)
+            return content
         except (requests.RequestException, ValueError) as e:
             print(f"     ! ReccoBeats {endpoint}: {type(e).__name__} (attempt {attempt}/4)", file=sys.stderr)
             time.sleep(2 * attempt)
@@ -710,8 +737,8 @@ def get_tempos(sp, tracks_by_id):
     skipped_local = len(missing) - len(rb_ids)  # local files: no Spotify ID, ReccoBeats can't look them up
     found, next_print = 0, 100
     if rb_ids:
-        note = f" - {skipped_local} local file(s) skipped here (no Spotify ID), still counted in 'to fetch' below" if skipped_local else ""
-        print(f"  * ReccoBeats : {len(rb_ids)} to try (batches of 40, ~0.5 s each){note}")
+        note = f" - {skipped_local} local file(s) skipped here (no Spotify ID)" if skipped_local else ""
+        print(f" -> ReccoBeats : {len(rb_ids)} to try (batches of 40, ~0.5 s each){note}")
     for i in range(0, len(rb_ids), 40):
         content = _reccobeats_get("audio-features", rb_ids[i:i + 40])
         if content is None:
@@ -727,7 +754,7 @@ def get_tempos(sp, tracks_by_id):
                 _cache_dirty += 1
                 found += 1
             if sid:
-                mood = {k: item[k] for k in ("energy", "valence", "danceability", "acousticness") if k in item}
+                mood = {k: item[k] for k in ("energy", "valence", "danceability", "acousticness") if item.get(k) is not None}
                 if mood:
                     _cache.setdefault("mood", {})[sid] = mood
 
@@ -762,7 +789,7 @@ def get_tempos(sp, tracks_by_id):
                     found += 1
                 if _deezer_failures >= 5:
                     break
-                if n % 50 == 0:
+                if n % 100 == 0:
                     print(f"      ... {n}/{len(missing)} checked, {found} found")
                     save_cache(force=True)
         left = sum(1 for v in tempos.values() if v is None)
@@ -773,6 +800,7 @@ def get_tempos(sp, tracks_by_id):
     if still2 and ANALYZE_DEEZER_PREVIEWS and _preview_urls:
         print(f" -> previews   : {len(still2)} to try (30 s downloads + local tempo analysis, ~3 s each)")
         measured = 0
+        failure_reasons = Counter()
         for n, tid in enumerate(still2, 1):
             url = _preview_urls.get(tid)    # collected by the Deezer stage, keyed by this track's ID
             if not url:
@@ -781,15 +809,20 @@ def get_tempos(sp, tracks_by_id):
             if bpm == "no-librosa":
                 print("      ! librosa unavailable (automatic install failed) -> preview analysis skipped")
                 break
-            if bpm:
+            if isinstance(bpm, str):
+                failure_reasons[bpm] += 1
+            elif bpm:
                 tempos[tid] = bpm
                 _cache["tempos"][tid] = bpm
                 _cache_dirty += 1
                 measured += 1
                 measured_locally.add(tid)
-            if n % 50 == 0:
+            if n % 100 == 0:
                 print(f"      ... {n}/{len(still2)} analysed, {measured} measured")
                 save_cache(force=True)
+        if failure_reasons:
+            top = ", ".join(f"{reason} x{count}" for reason, count in failure_reasons.most_common(3))
+            print(f"      ! {sum(failure_reasons.values())} preview download/analysis failure(s): {top}")
         stage("previews", measured, sum(1 for v in tempos.values() if v is None))
     save_cache(force=True)
     left = sum(1 for v in tempos.values() if v is None)
@@ -865,11 +898,14 @@ def measure_preview_bpm(preview_url):
         return "no-librosa"
     try:
         audio = _http.get(preview_url, timeout=20).content
+    except requests.RequestException as e:
+        return f"download:{type(e).__name__}"
+    try:
         y, sr = librosa.load(io.BytesIO(audio), sr=22050, mono=True, duration=30)
         tempo = float(librosa.beat.tempo(y=y, sr=sr)[0])
         return round(tempo, 1) if tempo > 0 else None
-    except Exception:
-        return None
+    except Exception as e:
+        return f"analysis:{type(e).__name__}"
 
 def bpm_bucket(tempo):
     """X0-X9 bucket: 87.3 -> 80, 154 -> 150 (truncated to the ten)."""
@@ -1448,7 +1484,7 @@ def gather_real_data(sp, user_id, display_name):
     print("Fetching artist genres...")
     artist_genres = get_artist_genres(sp, [aid for t in all_tracks.values() for aid in t["artist_ids"]])
     print()
-    return bpm_playlists, genre_playlists, contents, content_ids, source_tracks, tempos, measured_locally, artist_genres, year_contents
+    return bpm_playlists, genre_playlists, contents, content_ids, source_tracks, tempos, measured_locally, artist_genres, year_contents, source_name
 
 def _local_file_uri(path):
     """A file:// URI that works with webbrowser.open() on both Windows and Unix-like systems."""
