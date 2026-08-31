@@ -46,6 +46,8 @@ __all__ = [
     "INCLUDE_LIKED_SONGS",
     "CHECK_ALL_PLAYLISTS_FOR_DUPLICATES",
     "ANALYZE_YEARLY_PLAYLISTS",
+    "YEARLY_PLAYLIST_KEYWORD",
+    "APPLY_SKIPS_SLOW_LOOKUPS",
     "ANALYZE_DEEZER_PREVIEWS",
     "AUTO_OPEN_REVIEW",
     "EXPORT_LIBRARY_BACKUP",
@@ -77,6 +79,7 @@ __all__ = [
     "READ_SCOPES",
     "WRITE_SCOPES",
     "GENRE_PLAYLIST_NAMES",
+    "INCLASSABLE",
     "_SPOTIFY_ID_RE",
     "_http",
     "_cache",
@@ -192,7 +195,10 @@ LOCAL_MATCH_PACE = 0.8                      # Seconds between two searches (Spot
 # How much of your library this run looks at
 INCLUDE_LIKED_SONGS = False                 # Also sort your "Liked Songs" library (adds ~1 call per 50 liked)
 CHECK_ALL_PLAYLISTS_FOR_DUPLICATES = False  # Also checks every OTHER playlist YOU OWN (never ones you merely follow, like Discover Weekly)
-ANALYZE_YEARLY_PLAYLISTS = False            # Detect your own "top songs of YYYY" playlists (any language) and export a genre/BPM trend by year
+ANALYZE_YEARLY_PLAYLISTS = False            # Export a genre/BPM/mood trend by year, from playlists YOU own named per YEARLY_PLAYLIST_KEYWORD below
+                                            # LIMITATION (Spotify's own doing): since Nov 27 2024 Spotify's API refuses to read the CONTENTS of any Spotify-owned/algorithmic playlist at all
+YEARLY_PLAYLIST_KEYWORD = "Top by Year"     # A playlist YOU own is treated as year YYYY's recap if its name contains both keyword and YYYY
+APPLY_SKIPS_SLOW_LOOKUPS = True             # During --apply specifically, skip re-searching for BPM/local-file
 
 # Extra BPM effort
 ANALYZE_DEEZER_PREVIEWS = False             # Measure missing BPMs from 30 s previews (slow; installs librosa)
@@ -200,7 +206,7 @@ ANALYZE_DEEZER_PREVIEWS = False             # Measure missing BPMs from 30 s pre
 # Output, review, and social
 AUTO_OPEN_REVIEW = True                     # Open review_interface.html in your browser at the end of a run, already loaded with this run's report
 EXPORT_LIBRARY_BACKUP = True                # Export every analysed track (title, artists, album, Spotify link, playlists it's in) to a CSV - your own copy, independent of Spotify
-AUTO_FOLLOW_ARTISTS = False                 # Suggest following (via the review interface) every artist in your analysed library you don't follow yet
+AUTO_FOLLOW_ARTISTS = True                  # Suggest following (via the review interface) every artist in your analysed library you don't follow yet
 
 # TEST MODE - paste track links here (right-click a track > Share > Copy link) to test the external APIs
 # without touching Spotify. Non-empty list = run the test only, then stop. Results are cached.
@@ -252,7 +258,7 @@ EXPLICIT_GENRE_MAP = {
 
 # Only needed when a genre playlist's NAME differs from its category (Share > Copy link, keep the 22 chars).
 GENRE_PLAYLIST_ID_OVERRIDES = {
-    # "MyCategory": "0D8j9PayIN5ZSvDiwHkZiC",
+    # "MyCategory": "XXX",
 }
 
 # Sibling playlists that never flag each other as "misplaced" (their border is your taste, not an error).
@@ -311,9 +317,9 @@ if USE_SYSTEM_CERTS:
 # END OF CONFIG - nothing to modify below
 # ======================================================================================================================
 
-
+INCLASSABLE = "Inclassable"
 GENRE_PLAYLIST_NAMES = [name for name, _ in GENRE_RULES]
-
+GENRE_PLAYLIST_NAMES.append(INCLASSABLE)
 _SPOTIFY_ID_RE = re.compile(r"[A-Za-z0-9]{22}")
 
 _http = requests.Session()
@@ -321,7 +327,6 @@ if PROXY_URL:
     _http.proxies = {"http": PROXY_URL, "https": PROXY_URL}
 
 _cache = {"playlists": {}, "tempos": {}, "lastfm": {}, "localmatch": {}, "bpm_corroboration": {}, "quota_first_hit": {}, "mood": {}}
-
 _cache_dirty = 0
 
 def load_cache():
@@ -382,7 +387,7 @@ def quota_exit(context, retry_after=None):
             resume = time.localtime(first_hit[context] + 24 * 3600)
             day = " tomorrow" if resume.tm_mday != time.localtime().tm_mday else ""
             when = f"first hit {elapsed_h:.0f}h ago, usually clears ~24h after that (around {time.strftime('%H:%M', resume)}{day})"
-    print(f"Spotify quota hit ({context}): {when}. Saved - this step stops, the rest of the run continues.", file=sys.stderr)
+    print(f"  ! Spotify quota hit ({context}): {when}.", file=sys.stderr)
     sys.exit(1)
 
 def spotify_call(fn, context, attempts=4):
@@ -410,7 +415,6 @@ def spotify_call(fn, context, attempts=4):
                         f"  Check your internet connection, and PROXY_URL/USE_SYSTEM_CERTS in the CONFIG block if\n"
                         f"  you're on a restricted network (e.g. a corporate proxy) - progress so far is saved,\n"
                         f"  just run again once connectivity is back.")
-            print(f"  ! flaky network on {context} ({type(e).__name__}) -> retry {attempt}/{attempts - 1} in 5 s", file=sys.stderr)
             time.sleep(5)
 
 def validate_config(require_spotify=True):
@@ -626,16 +630,15 @@ def get_liked_tracks(sp):
     save_cache(force=True)
     return tracks
 
-def find_year_playlists(all_playlists, user_id, display_name):
-    """Finds Spotify's own personalised yearly recap playlists in any language - a 4-digit year in the name, PLUS a description that personally addresses you."""
-    if not display_name:
+def find_year_playlists(all_playlists, user_id):
+    """Finds YOUR OWN yearly recap playlists - never Spotify's own algorithmic "Top Songs of the Year"/"Wrapped" ones."""
+    if not YEARLY_PLAYLIST_KEYWORD:
         return {}
     by_year = defaultdict(list)
     current_year = datetime.now().year
+    keyword_re = re.compile(re.escape(YEARLY_PLAYLIST_KEYWORD), re.IGNORECASE)
     for p in all_playlists:
-        owned_by_you = p.get("owner", {}).get("id") == user_id
-        made_for_you = display_name.lower() in (p.get("description") or "").lower()
-        if not (owned_by_you or made_for_you):
+        if p.get("owner", {}).get("id") != user_id or not keyword_re.search(p["name"] or ""):
             continue
         for m in re.finditer(r"(19|20)\d{2}", p["name"]):
             year = int(m.group())
@@ -648,12 +651,10 @@ def get_my_playlists(sp):
     return fetch_all(sp, first, "playlist listing")
 
 _reccobeats_failures = 0
-_reccobeats_empty_streak = 0
-
 def _reccobeats_get(endpoint, ids):
     """One ReccoBeats request with retries; honours "slow down" (429) answers.
     After 3 failed batches in a row the script stops calling ReccoBeats for this run (the cache keeps what was fetched)."""
-    global _reccobeats_failures, _reccobeats_empty_streak
+    global _reccobeats_failures
     if _reccobeats_failures >= 3:
         return None
     url = RECCOBEATS_URL.rsplit("/", 1)[0] + "/" + endpoint
@@ -670,18 +671,7 @@ def _reccobeats_get(endpoint, ids):
                 continue
             r.raise_for_status()
             _reccobeats_failures = 0
-            content = r.json().get("content", [])
-            if content:
-                _reccobeats_empty_streak = 0
-            else:
-                _reccobeats_empty_streak += 1
-                # A "successful" (2xx) response with zero results is unusual enough to be worth a closer look.
-                if _reccobeats_empty_streak == 3:
-                    snippet = r.text[:200].replace("\n", " ")
-                    print(f"     ! ReccoBeats: {_reccobeats_empty_streak} batches in a row came back empty despite a "
-                          f"successful ({r.status_code}) response, {len(r.content)} byte(s) - raw start: {snippet!r}",
-                          file=sys.stderr)
-            return content
+            return r.json().get("content", [])
         except (requests.RequestException, ValueError) as e:
             print(f"     ! ReccoBeats {endpoint}: {type(e).__name__} (attempt {attempt}/4)", file=sys.stderr)
             time.sleep(2 * attempt)
@@ -692,7 +682,7 @@ def _reccobeats_get(endpoint, ids):
 
 _RB_ID_RE = re.compile(r"track/([A-Za-z0-9]+)")
 
-def get_tempos(sp, tracks_by_id):
+def get_tempos(sp, tracks_by_id, fetch_missing=True):
     """Finds the BPM of every track: cache, then Spotify, then ReccoBeats (by id), then Deezer (by artist+title), then
     optional local measurement of Deezer previews. One summary line per stage.
     Returns (tempos, measured_locally) - the second is the set of ids whose BPM came from measuring a preview ourselves
@@ -707,7 +697,10 @@ def get_tempos(sp, tracks_by_id):
     missing = [tid for tid, v in tempos.items() if v is None]
     stage("cache", len(tempos) - len(missing), len(missing))
     if not missing:
-        return tempos
+        return tempos, measured_locally
+    if not fetch_missing:
+        print(f"  * skipping the search for {len(missing)} missing BPM(s) this run (--apply re-checks your library, not the BPM cascade)")
+        return tempos, measured_locally
 
     # --- Spotify audio-features (pre-2024 apps only); synthetic local IDs excluded
     spotify_ids = [tid for tid in missing if _SPOTIFY_ID_RE.fullmatch(tid)]
@@ -1258,7 +1251,7 @@ def _norm(s):
     """Loose text normalisation (case, punctuation, version suffixes) used to compare titles/artists."""
     return re.sub(r"[^a-z0-9]+", " ", _clean_title(s).lower()).strip()
 
-def match_local_tracks(sp, tracks):
+def match_local_tracks(sp, tracks, fetch_missing=True):
     """Finds the Spotify catalog equivalent of each local file so it becomes sortable.
     Up to 3 searches per file, each only if the previous failed: normal fields, swapped fields (rescues inverted MP3 tags), free text.
     Hits AND misses are cached; the per-run cap counts search calls.
@@ -1272,6 +1265,12 @@ def match_local_tracks(sp, tracks):
     def eligible(hit):  # never searched, or an old miss that predates the extended modes
         return hit is None or (not hit.get("id") and hit.get("v", 1) < 2)
 
+    to_do = sum(1 for t in locals_ if eligible(_cache["localmatch"].get(t.get("local_id") or t["id"])))
+    if not fetch_missing:
+        if to_do:
+            print(f"  * skipping the search for {to_do} local file(s) this run (--apply re-checks your library, not the local-match cascade)")
+        return
+
     def acceptable(cand, name, artist):
         """A candidate is valid if its title/artist correspond to ours in EITHER orientation."""
         cn, ca = _norm(cand.get("name", "")), _norm(", ".join(a["name"] for a in cand.get("artists", [])))
@@ -1279,7 +1278,6 @@ def match_local_tracks(sp, tracks):
         pair_ok = lambda a, b: a and b and (a in b or b in a)
         return (pair_ok(tn, cn) and (pair_ok(ta, ca) or not ta)) or (pair_ok(tn, ca) and pair_ok(ta, cn))
 
-    to_do = sum(1 for t in locals_ if eligible(_cache["localmatch"].get(t.get("local_id") or t["id"])))
     if to_do:
         cap = f", capped at {MAX_LOCAL_MATCH_PER_RUN} search calls this run" if MAX_LOCAL_MATCH_PER_RUN else ""
         print(f"  * local match: {to_do} local file(s) to search (1-3 calls each{cap})")
@@ -1330,15 +1328,13 @@ def match_local_tracks(sp, tracks):
     except SystemExit:
         # quota_exit() already saved the cache and printed its own message.
         quota_hit = True
-        print(f"  ! Local-file matching stopped after {calls} search call(s) (quota) - {matched} matched so far;\n"
-            f"    the rest of the analysis still runs on what's available, and the remaining "
-            f"{sum(1 for t in locals_ if eligible(_cache['localmatch'].get(t.get('local_id') or t['id'])))} "
-            f"file(s) resume next run.", file=sys.stderr)
+        print(f"  ! Local-file matching stopped after {calls} search call(s) (quota) - {matched} matched so far, the remaining "
+            f"{sum(1 for t in locals_ if eligible(_cache['localmatch'].get(t.get('local_id') or t['id'])))} file(s) resume next run.", file=sys.stderr)
     save_cache(force=True)
     if not quota_hit:
         print(f"  * local match: {matched}/{len(locals_)} matched on the Spotify catalog ({calls} search calls this run)")
 
-def gather_real_data(sp, user_id, display_name):
+def gather_real_data(sp, user_id, display_name, apply_mode=False):
     """Reads everything the analysis needs: your playlists, the source tracks, the local-file matches, the BPMs and the artist genres.
     Returns it all to main()."""
     # ---------------- The user's playlists ----------------
@@ -1418,7 +1414,7 @@ def gather_real_data(sp, user_id, display_name):
     every = list(source_tracks)
     for lst in contents.values():
         every.extend(lst)
-    match_local_tracks(sp, every)
+    match_local_tracks(sp, every, fetch_missing=not (apply_mode and APPLY_SKIPS_SLOW_LOOKUPS))
 
     # ---------------- Optional add-ons: Liked Songs, then duplicate-scan of every other owned playlist ----------------
     # Both only add value on top of the core sort; neither should cost you progress on the above if the daily quota runs
@@ -1457,7 +1453,7 @@ def gather_real_data(sp, user_id, display_name):
     # tracks ride the SAME cascade for free instead of a separate, duplicated fetch ----------------
     year_contents = {}
     if ANALYZE_YEARLY_PLAYLISTS:
-        year_playlists = find_year_playlists(all_playlists, user_id, display_name)
+        year_playlists = find_year_playlists(all_playlists, user_id)
         if year_playlists:
             found = sum(len(v) for v in year_playlists.values())
             print(f"Yearly playlists found: {found} across {len(year_playlists)} year(s) -> "
@@ -1479,7 +1475,7 @@ def gather_real_data(sp, user_id, display_name):
             all_tracks.setdefault(t["id"], t)
 
     print("Fetching BPMs...")
-    tempos, measured_locally = get_tempos(sp, all_tracks)
+    tempos, measured_locally = get_tempos(sp, all_tracks, fetch_missing=not (apply_mode and APPLY_SKIPS_SLOW_LOOKUPS))
 
     print("Fetching artist genres...")
     artist_genres = get_artist_genres(sp, [aid for t in all_tracks.values() for aid in t["artist_ids"]])

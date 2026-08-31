@@ -250,14 +250,20 @@ extra is fetched or paid for. It only ever covers the subset of tracks whose BPM
 specifically (not Deezer or a local preview measurement); every mood view states its real coverage rather
 than implying it's the whole library.
 
-Detecting those yearly playlists isn't as simple as looking for ones you own: Spotify's own "Your Top Songs
-2023"-style playlists are algorithmic and typically owned by Spotify itself, not you, even once you've
-followed them into your library - and ownership alone can't tell one apart from an unrelated Spotify
-editorial playlist that also happens to mention a year (e.g. a generic "Hits 2010" compilation). What does
-reliably set them apart: Spotify always writes a description that names you personally ("Conçue pour
-\<your name\>", "Made for \<your name\>", whatever the phrasing in your language) - a generic editorial
-playlist's description never does. A playlist you made yourself that happens to mention a year is still
-picked up if you own it, as a fallback.
+**Yearly recap playlists have one hard requirement: they must be playlists YOU own.** Since November 27
+2024, Spotify's own API refuses to return the *contents* of any Spotify-owned/algorithmic playlist at
+all - so Spotify's own "Your Top Songs 2023"/Wrapped-style playlists can never work here, no matter how
+well they're detected: reading them fails with a 404 regardless (skipped cleanly, not a crash - that
+year just contributes nothing). This is
+[documented and confirmed by Spotify's own community team](https://community.spotify.com/t5/Spotify-for-Developers/Public-Playlist-Status-404-Resource-Not-Found/td-p/7296857)
+as expected behaviour on their end, not a bug on either end, and there is no workaround via the public API.
+
+Since it has to be a playlist you made yourself anyway, detection is a plain naming convention rather than
+guessing at Spotify's own wording in whatever language: `YEARLY_PLAYLIST_KEYWORD` (default `"Top"`) plus a
+4-digit year, anywhere in the name of a playlist you own - "Top 2023", "Mon Top 2023", "2023 Top" all
+match. Once a year, copy your real favourites (from Spotify's own Wrapped, or however you prefer to
+curate it) into a playlist named this way, and it's picked up automatically from then on. Set
+`YEARLY_PLAYLIST_KEYWORD = ""` to turn the feature off outright.
 
 ## Running it as a standalone .exe (optional)
 
@@ -396,9 +402,17 @@ A plain run is always read-only. To actually change your library, there are thre
    re-checks your library fresh (fast, thanks to the cache), applies your decisions, and shows a **full
    preview** of every playlist to create, track to add, move, or remove - grouped and counted. Nothing is
    written until you type `yes` at the single confirmation prompt that follows. If more than one
-   `decisions.json` turns up (script folder, report folder, `.spotify_data`, Downloads), the most recently
-   modified one is used, not just the first found - so a fresh export sitting in a lower-priority folder is
-   never shadowed by a stale one sitting in a higher-priority one.
+   `decisions.json` turns up (script folder, report folder, `.spotify_data`, Downloads, and any
+   browser-renamed copy like `decisions (1).json` sitting alongside it) the most recently modified one is
+   used, not just the first found - so a fresh export sitting in a lower-priority folder, or one your
+   browser had to rename to avoid overwriting an older download, is never shadowed by a stale one.
+
+With `APPLY_SKIPS_SLOW_LOOKUPS` on (the default), `--apply` skips re-searching for BPM/local-file matches
+that were still missing after the analysis these decisions came from - it still re-checks your library's
+current *contents* fresh either way (that's the point of the re-check), just without redoing lookups that
+already failed once minutes or hours earlier and essentially never succeed on an immediate retry. Set it
+to `False` to have `--apply` behave exactly like a full analysis instead - useful right after fixing a
+network/proxy issue that was blocking those lookups, so it actually retries them this time.
 
 Before the preview, `--apply` also tells you how long ago the decisions were exported and, if a newer
 `report.json` has been generated since (say you re-ran the analysis after exporting), flags it clearly.
@@ -431,6 +445,29 @@ currently sits. Review groups are also sorted by category first (genre, then BPM
 local-file matches, then artist-follows), by size within each - not just by raw size across everything,
 which used to interleave unrelated categories.
 
+## Utility scripts (optional)
+
+A few standalone one-off helpers, separate from the main toolkit above - each is a single file, dropped
+next to `SpotifyCore.py` and run with `python <name>.py`:
+
+- **`diagnose_playlists.py`** - prints the raw data the Spotify API actually returns for every one of your
+  playlists (owner id, owner display name, description) - read-only, changes nothing. Useful when a
+  playlist isn't being detected the way you expect and you want to see exactly what's really there, rather
+  than what the Spotify web player displays for it (the two aren't always the same thing).
+- **`merge_duplicate_playlists.py "KEEPER_ID" "DUPLICATE_ID_1" ["DUPLICATE_ID_2" ...]`** - merges the
+  tracks of several playlists into one you choose, then tells you it's safe to delete the others yourself.
+  Never deletes anything itself - merging tracks is safe (Spotify silently ignores a track that's already
+  there), deleting a playlist isn't easily undone, so that stays a deliberate, manual step on your end.
+  Local files are skipped (no catalog ID to merge by) and counted separately, so you know to move those by
+  hand if there are any.
+- **`clear_one_playlist_cache.py "PLAYLIST_ID"`** - removes a single playlist from the cache so it gets
+  read fresh next run, without discarding everything else already fetched. Useful if you suspect a
+  specific playlist's cached snapshot is stale (Spotify's `snapshot_id` doesn't always change reliably for
+  every kind of edit) rather than clearing the whole cache and re-fetching everything.
+
+Playlist IDs for any of these: right-click the playlist > Share > Copy link, keep the 22 characters
+between `/playlist/` and `?si=`.
+
 ## Troubleshooting
 
 - **`client_id: Invalid` in the browser** - check your app still exists on the dashboard (Spotify prunes
@@ -451,15 +488,14 @@ which used to interleave unrelated categories.
   cover playlist creation/editing yet. The script now detects this itself and deletes the stale login so
   Spotify re-asks (your browser reopens) - if it still happens, delete `.spotify_data\.spotify_token_cache`
   by hand and run again.
-- **Deezer (or ReccoBeats) consistently returns 0 results** - the script now tells the two apart on its
-  own where it can. A batch that comes back "successful" (2xx) but empty several times in a row prints the
-  raw response once, so a proxy silently returning an empty body instead of actually failing doesn't look
-  identical to a genuinely obscure batch of tracks. A hard connection failure (`ConnectionError`,
-  `ConnectTimeout`...) shows up as an explicit error rather than a silent 0. In practice this is how a real
-  outage on ReccoBeats' own end (a Cloudflare Tunnel error, nothing to do with this project or your network)
-  got told apart from a local proxy/certificate problem in about a minute, instead of guessing between the
-  two - if you see one, check whether the service itself is reachable in a browser before assuming it's
-  your setup.
+- **Deezer (or ReccoBeats) consistently returns 0 results** - a well-formed, empty response is a normal,
+  valid answer (that particular batch of tracks just isn't in the service's catalog) and isn't flagged as
+  anything unusual. A genuine connection failure is different, though, and always shows up as an explicit
+  error (`ConnectionError`, `ConnectTimeout`...) rather than a silent 0 - in practice this is how a real
+  outage on ReccoBeats' own end (a Cloudflare Tunnel error, nothing to do with this project or your
+  network) got told apart from a local proxy/certificate problem in about a minute, instead of guessing
+  between the two. If you see repeated explicit errors like this, check whether the service itself is
+  reachable in a browser before assuming it's your setup.
 - **Local tempo analysis (`ANALYZE_DEEZER_PREVIEWS`) takes forever and measures 0** - every download/analysis
   failure used to collapse to a silent "couldn't measure this one", indistinguishable from 1000 unrelated
   misses. It now prints a one-line summary of what actually went wrong (`1450 preview download/analysis

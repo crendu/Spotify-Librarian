@@ -93,7 +93,7 @@ def _distribution_stats(tracks, tempos, artist_genres):
     mood_sums = defaultdict(lambda: {"energy": 0.0, "valence": 0.0, "danceability": 0.0, "acousticness": 0.0, "n": 0})
     for t in tracks:
         genre, _, _, _ = resolve_genre(t, artist_genres)
-        cat = genre or "Inclassable"
+        cat = genre or INCLASSABLE
         genre_counts[cat] += 1
         tempo = tempos.get(t["id"])
         if tempo:

@@ -254,13 +254,17 @@ def warn_if_stale(decisions):
 def load_decisions():
     """Finds decisions.json: next to the script, in the report folder, in .spotify_data, or in your Downloads
     (wherever review_interface.html's "Export decisions" button saved it)."""
-    candidates = [DECISIONS_FILE, os.path.join(OUTPUT_DIR, DECISIONS_FILE), os.path.join(DATA_DIR, DECISIONS_FILE),
-                os.path.join(os.path.expanduser("~"), "Downloads", DECISIONS_FILE)]
-    existing = [p for p in candidates if os.path.exists(p)]
+    import glob
+    base, ext = os.path.splitext(DECISIONS_FILE)   # "decisions", ".json"
+    candidate_dirs = [".", OUTPUT_DIR, DATA_DIR, os.path.join(os.path.expanduser("~"), "Downloads")]
+    existing = []
+    for d in candidate_dirs:
+        existing.extend(glob.glob(os.path.join(d, f"{glob.escape(base)}*{ext}")))
     if not existing:
-        sys.exit(f"ERROR: no '{DECISIONS_FILE}' found next to the script, in {OUTPUT_DIR}/, in {DATA_DIR}/, or in Downloads.\n"
-                 f"Open review_interface.html, load {OUTPUT_DIR}/report.json, decide, click 'Export decisions',\n"
-                 f"and make sure the downloaded file lands in one of those places, then run --apply again.")
+        sys.exit(f"ERROR: no '{DECISIONS_FILE}' (or a browser-renamed copy of it) found next to the script,\n"
+                f"in {OUTPUT_DIR}/, in {DATA_DIR}/, or in Downloads.\n"
+                f"Open review_interface.html, load {OUTPUT_DIR}/report.json, decide, click 'Export decisions',\n"
+                f"and make sure the downloaded file lands in one of those places, then run --apply again.")
     path = max(existing, key=os.path.getmtime)
     if len(existing) > 1:
         others = ", ".join(p for p in existing if p != path)
@@ -464,7 +468,6 @@ def suggest_additions(source_tracks, tempos, bpm_playlists, genre_playlists, ids
 
             # Every source in the cascade came up empty - park it in a real "Inclassable" playlist instead of the track vanishing with no action at all.
             if aid:
-                INCLASSABLE = "Inclassable"
                 tier, group = local_tier or ("review", "genre_unclassifiable")
                 if INCLASSABLE in genre_playlists:
                     pname = genre_playlists[INCLASSABLE]["name"]
@@ -690,7 +693,7 @@ def _setup(apply_mode):
         print("Per-track genre: Last.fm ACTIVE (primary source), Spotify artist as fallback\n")
     else:
         print("WARNING: LASTFM_API_KEY missing -> genre via Spotify artists only (free key: last.fm/account/create)\n")
-    gathered = gather_real_data(sp, me["id"], me["display_name"])
+    gathered = gather_real_data(sp, me["id"], me["display_name"], apply_mode)
     return sp, me, gathered
 
 def _run_sort(sp, gathered, apply_mode, auto_open=True):
